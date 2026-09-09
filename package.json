@@ -1,0 +1,15 @@
+{
+  "type": "module",
+  "name": "ctrader-prop-bot",
+  "version": "1.0.0",
+  "description": "cTrader Prop Trading Bot",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --check index.js src/index.js src/api/ctraderFixClient.js src/patternDetection/headShoulders.js src/patternDetection/patternEngine.js src/patternDetection/topDownAnalysis.js src/risk/propRiskEngine.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.0.0",
+    "axios": "^1.0.0"
+  }
+}

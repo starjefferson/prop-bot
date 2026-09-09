@@ -1,0 +1,208 @@
+================================================================================
+          cTRADER PROP FIRM AUTOMATED H&S TRADING BOT - SETUP & OPERATING MANUAL
+================================================================================
+
+1. OVERVIEW & BOT ARCHITECTURE
+--------------------------------------------------------------------------------
+This project is an autonomous Head & Shoulders (H&S) algorithmic trading bot 
+built specifically to execute trades on cTrader using institutional FIX 4.4 
+SSL sockets.
+
+Key Architectural Features:
+- Direct FIX API Protocol: Communicates directly via cTrader's native FIX 4.4 SSL 
+  sockets (demo-uk-eqx-01.p.c-trader.com, Port 5212 for Trading, Port 5211 for Quotes).
+  This completely bypasses developer portal approvals, OAuth tokens, and KYC reviews.
+- Decoupled Prop Firm Layer: Strategy logic is completely decoupled from prop firm 
+  compliance rules. You can switch between prop firms (Alpha Capital Group, 
+  The5ers, FTMO, FundingPips) by changing a single environment variable.
+- Autonomous Lifecycle: No MetaTrader 5 (MT5), no desktop terminals, and no EAs 
+  required. It runs 24/7 on any Node.js environment (Linux VPS, cloud worker, etc.).
+
+
+2. DIRECTORY STRUCTURE
+--------------------------------------------------------------------------------
+ctrader-prop-bot/
+├── config/
+│   └── propFirms.js          # Prop firm profiles (Alpha Capital, The5ers, FTMO)
+├── src/
+│   ├── api/
+│   │   └── ctraderFixClient.js# Institutional FIX 4.4 SSL socket client & order routing
+│   ├── patternDetection/
+│   │   ├── headShoulders.js  # H&S structural math, SL buffer & S/R TP calculation
+│   │   ├── topDownAnalysis.js# 3/4 SMA trend bias engine (1W, 1D, 4H, 1H)
+│   │   └── patternEngine.js  # Multi-timeframe pattern alignment hub
+│   └── risk/
+│       └── propRiskEngine.js # Compliance & drawdown guard interceptor
+├── index.js                  # Main execution loop & Smart Hourly Scheduler
+├── .env.local                # Private FIX API credentials & active firm selector
+├── .gitignore                # Git exclusions (API keys, node_modules, history)
+├── history.json              # Pattern fingerprint memory & trade logs
+└── package.json              # Node.js dependencies & execution scripts
+
+
+3. HOW THE BOT WORKS (CORE STRATEGY & LOGIC PIPELINE)
+--------------------------------------------------------------------------------
+The bot operates in an automated 9-step pipeline executed at the start of every hour 
+(:00:05 UTC):
+
+1. Smart Hourly Polling: The bot calculates the exact time until 5 seconds past 
+   the top of the next hour and sleeps until then to analyze freshly closed candles.
+2. Candle Data Ingestion: Streams 200 bars across 1W, 1D, 4H, and 1H timeframes 
+   for major forex pairs.
+3. Top-Down Trend Bias (3/4 SMA Rule): Calculates a 20-period Simple Moving Average 
+   (SMA 20) on 1W, 1D, 4H, and 1H charts. Requires at least 3 out of 4 timeframes 
+   to agree on trend direction (Price > SMA = BUY, Price < SMA = SELL).
+4. Structural Pattern Detection: Scans 200 H1 bars for 3 structural swing points 
+   (Left Shoulder s1, Head, Right Shoulder s2). Calculates the exact Neckline Zone 
+   from intermediate price peaks or troughs.
+5. Stop Loss & Take Profit Math:
+   - Stop Loss (SL): Placed at the Right Shoulder (s2) peak/valley + 5-pip buffer 
+     (0.0005 standard pairs / 0.05 JPY pairs) for tighter, higher-RR entries.
+   - Take Profit (TP): Derived dynamically from historical Support/Resistance 
+     zones. Enforces a strict 2.5 to 3.0 Risk-to-Reward (RR) window. Setups 
+     blocked by key S/R before 2.5 RR are automatically rejected.
+6. Pattern Fingerprinting Guard: Generates a unique setup ID 
+   (`${symbol}_${type}_${headTime}`) saved to `history.json`. Ensures no chart 
+   pattern is ever traded twice.
+7. Distribution Guard: Rejects trades if the price has already distributed 
+   more than 20 pips past the neckline zone, preventing chasing late moves.
+8. Prop Firm Compliance Interceptor (`PropRiskEngine`):
+   - Validates total equity against the firm's Static Max Loss Floor (e.g., 10%).
+   - Validates equity against the Balance-Based Daily Loss Limit (e.g., 5%).
+   - Calculates dynamic position sizing (units/volume) matching your exact 
+     configured account risk percentage (e.g., 2.0%).
+9. FIX Order Execution: Transmits a standard FIX `35=D` (New Order Single) 
+   message directly to cTrader over SSL with attached Stop Loss and Take Profit.
+
+
+4. GETTING CTRADER FIX API CREDENTIALS (NO KYC REQUIRED)
+--------------------------------------------------------------------------------
+Unlike Open API WebSockets, cTrader FIX API credentials are auto-generated 
+inside your trading account settings and require ZERO developer portal approval 
+or identity verification:
+
+Step 1: Open cTrader
+- Log in to cTrader Web (https://app.ctrader.com/) or your cTrader desktop/mobile app.
+
+Step 2: Navigate to FIX API Settings
+- Click on Settings (gear icon) -> FIX API.
+
+Step 3: Copy Account FIX Details
+- Host name: demo-uk-eqx-01.p.c-trader.com (or live equivalent)
+- Quote Port: 5211 (SSL)
+- Trade Port: 5212 (SSL)
+- SenderCompID: e.g., demo.ctrader.5907955
+- Password: Copy your account FIX password
+- Account Number: e.g., 5907955
+
+
+5. LOCAL SETUP & INSTALLATION GUIDE
+--------------------------------------------------------------------------------
+Prerequisites: Node.js (v18 or higher) installed on your system.
+
+Step 1: Clone or Download the Repository
+  git clone https://github.com/your-username/ctrader-prop-bot.git
+  cd ctrader-prop-bot
+
+Step 2: Install Node.js Dependencies
+  npm install
+
+Step 3: Configure `.env.local`
+  Create a `.env.local` file in the root project folder:
+
+  # cTrader FIX API Configuration
+  FIX_HOST=demo-uk-eqx-01.p.c-trader.com
+  FIX_QUOTE_PORT=5211
+  FIX_TRADE_PORT=5212
+  FIX_SENDER_COMP_ID=demo.ctrader.5907955
+  FIX_PASSWORD=your_fix_password_here
+  FIX_ACCOUNT_NUMBER=5907955
+
+  # Active Prop Firm Selection
+  # Options: 'alpha_capital', 'the5ers_high_stakes', 'ftmo'
+  ACTIVE_PROP_FIRM=alpha_capital
+
+  # Risk & Strategy Configuration
+  RISK_PERCENT=2.0
+  MIN_RR=2.5
+  MAX_RR=3.0
+
+Step 4: Run the Bot
+  node index.js
+
+
+6. SWITCHING PROP FIRMS
+--------------------------------------------------------------------------------
+To change prop firm compliance rules, edit `ACTIVE_PROP_FIRM` in `.env.local`:
+
+- For Alpha Capital Group: `ACTIVE_PROP_FIRM=alpha_capital`
+  (Enforces 10% Static Max Loss, 5% Daily Loss, >2 min trade duration compliance)
+
+- For The5ers High Stakes: `ACTIVE_PROP_FIRM=the5ers_high_stakes`
+  (Enforces 10% Static Max Loss, 5% Daily Loss, no trade duration restrictions)
+
+- For FTMO: `ACTIVE_PROP_FIRM=ftmo`
+  (Enforces 10% Static Max Loss, 5% Daily Loss, weekend holding guards)
+
+
+7. TRANSITIONING FROM DEMO TO A PAID PROP FIRM EVALUATION / LIVE ACCOUNT
+--------------------------------------------------------------------------------
+When you pass your free trial testing and purchase an active challenge or live 
+funded account with Alpha Capital Group (or any cTrader-supported prop firm like 
+The5ers or FTMO), you DO NOT need to rewrite or recompile any bot code.
+
+Step 1: Purchase and Activate Your Challenge Account
+- Complete your checkout on the prop firm dashboard (e.g., Alpha Capital Group).
+- Ensure you select 'cTrader' as your trading platform.
+
+Step 2: Access Your Paid Account's FIX API Settings
+- Log in to cTrader Web (https://app.ctrader.com/) or the desktop app.
+- Switch your active account to your newly assigned Paid Challenge Account.
+- Go to Settings (gear icon) -> FIX API.
+
+Step 3: Copy the Paid Account Credentials
+- Host name: Copy the host (e.g., 'live-uk-eqx-01.p.c-trader.com' or 'demo-uk-eqx-01.p.c-trader.com').
+- Trade Port: 5212 (SSL)
+- SenderCompID: Copy your new account's SenderCompID.
+- Password: Copy the new account FIX password.
+- Account Number: Copy your new numeric account ID.
+
+Step 4: Update `.env.local`
+  Update FIX_HOST, FIX_SENDER_COMP_ID, FIX_PASSWORD, and FIX_ACCOUNT_NUMBER.
+
+Step 5: Restart the Bot
+  Run `node index.js` or `pm2 restart ctrader-fix-bot`.
+
+
+8. 24/7 CLOUD HOSTING GUIDE (NO WINDOWS / NO MT5 REQUIRED)
+--------------------------------------------------------------------------------
+Since cTrader uses direct FIX SSL sockets, you do NOT need a Windows VPS!
+
+Option A: Free 24/7 Cloud Container (Koyeb.com)
+1. Push repository to GitHub (ensure `.env.local` is in `.gitignore`).
+2. Create a Web/Worker Service on Koyeb connected to your repository.
+3. Configure environment variables in Koyeb dashboard.
+
+Option B: Low-Cost Linux VPS (DigitalOcean, Vultr, Linode) - ~$4-$6/mo
+1. SSH into your Linux instance: `ssh root@your_vps_ip`
+2. Install Node.js & Git.
+3. Clone your repository and create `.env.local`.
+4. Install PM2 process manager: `npm install -g pm2`
+5. Start the bot: `pm2 start index.js --name "ctrader-fix-bot"`
+6. Enable auto-restart on system reboot: `pm2 save && pm2 startup`
+
+
+9. TROUBLESHOOTING & COMMON ISSUES
+--------------------------------------------------------------------------------
+- "cTrader FIX Socket Error / ECONNREFUSED":
+  Verify that `FIX_HOST` and `FIX_TRADE_PORT` (5212) are correct and that port 5212 
+  is not blocked by an outbound firewall.
+- "Message Rejected: 35=3":
+  Check your `FIX_PASSWORD` and `FIX_SENDER_COMP_ID` values in `.env.local`.
+- "Rejected RR":
+  The setup was detected, but the breakout candle moved price too far before 
+  closing, resulting in an RR ratio below 2.5 or above 3.0.
+- "Setup Expired: Price already distributed":
+  The price breakout occurred several hours ago and has moved >20 pips past the 
+  neckline, so the bot avoided chasing a late entry.
+================================================================================
