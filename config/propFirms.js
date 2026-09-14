@@ -1,21 +1,55 @@
+// [File: config/propFirms.js]
+
 export const PROP_FIRM_PROFILES = {
-  // Atlas Funded - 2-Step Standard (Most Popular Model)
-  atlas_funded_2step: {
-    name: "Atlas Funded (2-Step Standard)",
-    dailyLossPercent: 5.0,           // 5% daily loss limit (recalculated at 00:00 UTC)
-    maxDrawdownPercent: 10.0,        // 10% max static drawdown
-    drawdownType: "static",          // Anchored strictly to starting balance
-    dailyResetTimeUTC: "00:00",      // Midnight UTC reset
-    minTradeDurationSeconds: 0,      // No minimum trade duration restriction
-    newsHoldWindowMinutes: 0,        // News trading fully permitted
-    weekendHoldingAllowed: true      // Holding trades over weekends permitted
+  // ==========================================
+  // EVALUATION ACCOUNTS (Step 1 / Challenge Phase)
+  // ==========================================
+
+  // [Atlas 2-Step Evaluation Profile]
+  atlas_2step_eval: {
+    name: "Atlas 2-Step Evaluation",
+    dailyLossPercent: 5.0,           // [5% daily loss limit reset at 00:00 UTC]
+    maxDrawdownPercent: 10.0,        // [10% static max drawdown]
+    drawdownType: "static",          // [Anchored to initial starting balance]
+    dailyResetTimeUTC: "00:00",
+    minTradeDurationSeconds: 0,
+    newsHoldWindowMinutes: 0,
+    weekendHoldingAllowed: true
   },
 
-  // Atlas Funded - 1-Step Standard
-  atlas_funded_1step: {
-    name: "Atlas Funded (1-Step Standard)",
-    dailyLossPercent: 4.0,           // 4% daily loss limit
-    maxDrawdownPercent: 7.0,         // 7% max static drawdown
+  // [Atlas 1-Step Evaluation Profile]
+  atlas_1step_eval: {
+    name: "Atlas 1-Step Evaluation",
+    dailyLossPercent: 5.0,           // [5% daily loss limit]
+    maxDrawdownPercent: 7.0,         // [7% static max drawdown]
+    drawdownType: "static",          // [Anchored to initial starting balance]
+    dailyResetTimeUTC: "00:00",
+    minTradeDurationSeconds: 0,
+    newsHoldWindowMinutes: 0,
+    weekendHoldingAllowed: true
+  },
+
+  // ==========================================
+  // FUNDED ACCOUNTS (Live / Payout Eligible Phase)
+  // ==========================================
+
+  // [Atlas 1-Step Funded Profile]
+  atlas_1step_funded: {
+    name: "Atlas 1-Step Funded",
+    dailyLossPercent: 3.0,           // [Enforces tighter 3% daily loss limit on Live Funded stage]
+    maxDrawdownPercent: 6.0,         // [Enforces tighter 6% static max drawdown on Live Funded stage]
+    drawdownType: "static",          // [Anchored to initial starting balance]
+    dailyResetTimeUTC: "00:00",
+    minTradeDurationSeconds: 0,
+    newsHoldWindowMinutes: 0,
+    weekendHoldingAllowed: true
+  },
+
+  // [Atlas 2-Step Funded Profile]
+  atlas_2step_funded: {
+    name: "Atlas 2-Step Funded",
+    dailyLossPercent: 5.0,           // [5% daily loss limit]
+    maxDrawdownPercent: 10.0,        // [10% static max drawdown]
     drawdownType: "static",
     dailyResetTimeUTC: "00:00",
     minTradeDurationSeconds: 0,
@@ -23,43 +57,35 @@ export const PROP_FIRM_PROFILES = {
     weekendHoldingAllowed: true
   },
 
-  // Atlas Funded - Instant Funded
-  atlas_funded_instant: {
-    name: "Atlas Funded (Instant)",
-    dailyLossPercent: 3.0,           // 3% daily loss limit
-    maxDrawdownPercent: 5.0,         // 5% trailing max drawdown
-    drawdownType: "trailing",        // Trailing drawdown model
+  // [Atlas Instant Funded Profile]
+  atlas_instant_funded: {
+    name: "Atlas Instant Funded",
+    dailyLossPercent: 3.0,           // [3% daily loss limit]
+    maxDrawdownPercent: 5.0,         // [5% trailing max drawdown]
+    drawdownType: "trailing",        // [Follows account equity high-water mark]
     dailyResetTimeUTC: "00:00",
     minTradeDurationSeconds: 0,
     newsHoldWindowMinutes: 0,
     weekendHoldingAllowed: true
   },
 
-  // Alpha Capital Group Profile
+  // ==========================================
+  // OTHER PROP FIRMS
+  // ==========================================
+
+  // [Alpha Capital Group Profile]
   alpha_capital: {
     name: "Alpha Capital Group",
-    dailyLossPercent: 5.0,           // 5% max daily loss
-    maxDrawdownPercent: 10.0,        // 10% max static drawdown
-    drawdownType: "static",          // Anchored to starting balance
-    dailyResetTimeUTC: "00:00",      // Reset at Midnight UTC
-    minTradeDurationSeconds: 120,    // Alpha Capital > 2-minute average duration rule
-    newsHoldWindowMinutes: 2,        // 2 mins before/after news window
-    weekendHoldingAllowed: true
-  },
-
-  // The5ers High Stakes Profile
-  the5ers_high_stakes: {
-    name: "The5ers High Stakes",
     dailyLossPercent: 5.0,
     maxDrawdownPercent: 10.0,
     drawdownType: "static",
     dailyResetTimeUTC: "00:00",
-    minTradeDurationSeconds: 0,      // No minimum duration rule
-    newsHoldWindowMinutes: 0,
+    minTradeDurationSeconds: 120,    // [2-minute minimum average trade duration rule]
+    newsHoldWindowMinutes: 2,
     weekendHoldingAllowed: true
   },
 
-  // FTMO Challenge Profile
+  // [FTMO Standard Profile]
   ftmo: {
     name: "FTMO Standard",
     dailyLossPercent: 5.0,
@@ -68,6 +94,6 @@ export const PROP_FIRM_PROFILES = {
     dailyResetTimeUTC: "00:00",
     minTradeDurationSeconds: 0,
     newsHoldWindowMinutes: 2,
-    weekendHoldingAllowed: false     // Closed on weekends unless swing account
+    weekendHoldingAllowed: false     // [Weekend holding restricted]
   }
 };
