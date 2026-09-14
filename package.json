@@ -9,7 +9,8 @@
     "test": "node --check index.js src/index.js src/api/ctraderFixClient.js src/patternDetection/headShoulders.js src/patternDetection/patternEngine.js src/patternDetection/topDownAnalysis.js src/risk/propRiskEngine.js"
   },
   "dependencies": {
+    "axios": "^1.0.0",
     "dotenv": "^16.0.0",
-    "axios": "^1.0.0"
+    "metaapi.cloud-sdk": "^29.3.3"
   }
 }

@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import dotenv from "dotenv";
-import { initializeFixClient, getCandles, getAccountBalance, placeFixOrder } from "./api/ctraderFixClient.js";
+import MetaApi from "metaapi.cloud-sdk";
 import { runDetection } from "./patternDetection/patternEngine.js";
 import { checkTopDownAlignment } from "./patternDetection/topDownAnalysis.js";
 import { PropRiskEngine } from "./risk/propRiskEngine.js";
@@ -11,11 +11,14 @@ dotenv.config({ path: ".env.local" });
 
 const PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD"];
 const HISTORY_PATH = path.resolve(process.cwd(), "history.json");
-const ACTIVE_PROP_FIRM = process.env.ACTIVE_PROP_FIRM || "alpha_capital";
-const RISK_PERCENT = parseFloat(process.env.RISK_PERCENT || "2.0");
+const ACTIVE_PROP_FIRM = process.env.ACTIVE_PROP_FIRM || "atlas_funded_2step";
+const RISK_PERCENT = parseFloat(process.env.RISK_PERCENT || "1.0");
 const MIN_RR = parseFloat(process.env.MIN_RR || "2.5");
 const MAX_RR = parseFloat(process.env.MAX_RR || "3.0");
-const MAX_CONCURRENT_TRADES = parseInt(process.env.MAX_CONCURRENT_TRADES || String(defaultConfig.maxConcurrentTrades || 3), 10);
+const MAX_CONCURRENT_TRADES = parseInt(process.env.MAX_CONCURRENT_TRADES || String(defaultConfig.maxConcurrentTrades || 2), 10);
+
+const METAAPI_TOKEN = process.env.METAAPI_TOKEN;
+const METAAPI_ACCOUNT_ID = process.env.METAAPI_ACCOUNT_ID;
 
 const loadJSON = (filePath) => {
   try {
@@ -29,13 +32,49 @@ const saveJSON = (filePath, data) => {
   catch (e) { console.error(`❌ DISK ERROR: ${e.message}`); }
 };
 
-async function runTradingCycle(riskEngine) {
+/**
+ * Helper to convert standard timeframe codes to MetaApi timeframe strings
+ */
+function getMetaApiTimeframe(tf) {
+  const map = { "1W": "1w", "1D": "1d", "4H": "4h", "1H": "1h" };
+  return map[tf] || "1h";
+}
+
+/**
+ * Fetch historical candles using MetaApi SDK
+ */
+async function fetchMetaApiCandles(account, symbol, tf, count) {
+  try {
+    const metaApiTf = getMetaApiTimeframe(tf);
+    const candles = await account.getHistoricalCandles(symbol, metaApiTf, null, count);
+    if (!candles || candles.length === 0) return null;
+
+    // Map candles to standard { open, high, low, close, time } structure
+    return candles.map(c => ({
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+      time: new Date(c.time).getTime()
+    })).reverse(); // Standardized to newest first
+  } catch (err) {
+    console.error(`⚠️ MetaApi candle fetch error for ${symbol} (${tf}):`, err.message);
+    return null;
+  }
+}
+
+async function runTradingCycle(metaApiConnection, account, riskEngine) {
   console.log(`\n==================================================`);
-  console.log(`🔍 [${new Date().toISOString()}] Starting cTrader FIX Market Scan...`);
+  console.log(`🔍 [${new Date().toISOString()}] Starting MetaApi (Atlas Funded) Market Scan...`);
   console.log(`==================================================`);
 
   const history = loadJSON(HISTORY_PATH);
-  const balance = await getAccountBalance();
+  
+  // Get live balance & equity directly from MetaApi connection
+  const accountInformation = await metaApiConnection.getAccountInformation();
+  const balance = accountInformation.balance;
+  const equity = accountInformation.equity;
+
   let executedInCycle = 0;
 
   for (const symbol of PAIRS) {
@@ -45,14 +84,14 @@ async function runTradingCycle(riskEngine) {
     }
 
     try {
-      // 1. Fetch Candle History across 1W, 1D, 4H, and 1H
-      const w1 = await getCandles(symbol, "1W", 50);
-      const d1 = await getCandles(symbol, "1D", 200);
-      const h4 = await getCandles(symbol, "4H", 200);
-      const h1 = await getCandles(symbol, "1H", 200);
+      // 1. Fetch Candle History via MetaApi SDK across 1W, 1D, 4H, and 1H
+      const w1 = await fetchMetaApiCandles(account, symbol, "1W", 50);
+      const d1 = await fetchMetaApiCandles(account, symbol, "1D", 200);
+      const h4 = await fetchMetaApiCandles(account, symbol, "4H", 200);
+      const h1 = await fetchMetaApiCandles(account, symbol, "1H", 200);
 
       if (!w1 || !d1 || !h4 || !h1 || h1.length < 50) {
-        console.log(`⚠️ [${symbol}] Insufficient candle history returned.`);
+        console.log(`⚠️ [${symbol}] Insufficient candle history returned from MetaApi.`);
         continue;
       }
 
@@ -113,10 +152,10 @@ async function runTradingCycle(riskEngine) {
         continue;
       }
 
-      // 8. Prop Firm Compliance Interceptor
+      // 8. Prop Firm Compliance Interceptor (Atlas Funded Rules)
       const riskValidation = riskEngine.validateOrder({
         balance,
-        currentEquity: balance,
+        currentEquity: equity,
         symbol,
         entryPrice: currentPrice,
         slPrice: pattern.sl,
@@ -128,28 +167,28 @@ async function runTradingCycle(riskEngine) {
         continue;
       }
 
-      // 9. Position Sizing & Direct FIX Order Execution
-      let unitsToTrade;
+      // 9. Lot Sizing & Direct MetaApi MT5 Order Execution
+      let lotSize;
       if (symbol.includes("JPY")) {
-        unitsToTrade = Math.round((riskValidation.maxCapitalToRisk * currentPrice) / risk);
-      } else if (symbol.endsWith("USD")) {
-        unitsToTrade = Math.round(riskValidation.maxCapitalToRisk / risk);
+        lotSize = (riskValidation.maxCapitalToRisk * currentPrice) / (risk * 100000);
       } else {
-        unitsToTrade = Math.round((riskValidation.maxCapitalToRisk * currentPrice) / risk);
+        lotSize = riskValidation.maxCapitalToRisk / (risk * 100000);
       }
 
-      const minUnits = symbol.includes("XAU") ? 1 : 1000;
-      unitsToTrade = Math.max(minUnits, unitsToTrade);
+      // Standard lot rounding (min 0.01 lots)
+      lotSize = Math.max(0.01, Math.round(lotSize * 100) / 100);
 
-      console.log(`🎯 [${symbol}] TARGET RR ACHIEVED (${rr.toFixed(2)}). Executing cTrader FIX Order... Units: ${unitsToTrade}`);
+      console.log(`🎯 [${symbol}] TARGET RR ACHIEVED (${rr.toFixed(2)}). Executing MetaApi MT5 Order... Lots: ${lotSize}`);
 
-      const orderResult = await placeFixOrder({
+      const actionType = pattern.type === "buy" ? "ORDER_TYPE_BUY" : "ORDER_TYPE_SELL";
+      
+      const orderResult = await metaApiConnection.createMarketBuyOrder(
         symbol,
-        units: unitsToTrade,
-        side: pattern.type,
-        sl: pattern.sl,
-        tp: pattern.tp
-      });
+        lotSize,
+        pattern.sl,
+        pattern.tp,
+        { comment: `H&S Bot - ${ACTIVE_PROP_FIRM}` }
+      );
 
       executedInCycle++;
 
@@ -161,10 +200,10 @@ async function runTradingCycle(riskEngine) {
         entryPrice: currentPrice,
         sl: pattern.sl,
         tp: pattern.tp,
-        units: unitsToTrade,
+        lots: lotSize,
         rr: rr.toFixed(2),
         propFirm: ACTIVE_PROP_FIRM,
-        orderId: orderResult.clOrdId,
+        orderId: orderResult.numericCode || orderResult.stringCode,
         executionTime: new Date().toISOString()
       });
       saveJSON(HISTORY_PATH, history);
@@ -178,7 +217,7 @@ async function runTradingCycle(riskEngine) {
 /**
  * Smart Hourly Scheduler (Runs at :00:05 UTC every hour)
  */
-function scheduleNextHourlyScan(riskEngine) {
+function scheduleNextHourlyScan(metaApiConnection, account, riskEngine) {
   const now = new Date();
   const nextHour = new Date(now);
   nextHour.setHours(now.getHours() + 1, 0, 5, 0);
@@ -186,35 +225,47 @@ function scheduleNextHourlyScan(riskEngine) {
   const delayMs = nextHour.getTime() - now.getTime();
   const minutesRemaining = (delayMs / 1000 / 60).toFixed(1);
 
-  console.log(`\n⏰ Next cTrader scan scheduled in ${minutesRemaining} minutes (at ${nextHour.toLocaleTimeString()}).`);
+  console.log(`\n⏰ Next scheduled scan in ${minutesRemaining} minutes (at ${nextHour.toLocaleTimeString()}).`);
 
   setTimeout(async () => {
-    // Check if new UTC day for daily drawdown baseline reset (00:00 UTC)
+    // Check for 00:00 UTC day reset to update daily drawdown baseline
     const currentUtc = new Date();
     if (currentUtc.getUTCHours() === 0) {
-      const freshBalance = await getAccountBalance();
-      riskEngine.updateStartOfDayBalance(freshBalance);
+      const info = await metaApiConnection.getAccountInformation();
+      riskEngine.updateStartOfDayBalance(info.balance);
     }
 
-    await runTradingCycle(riskEngine);
-    scheduleNextHourlyScan(riskEngine);
+    await runTradingCycle(metaApiConnection, account, riskEngine);
+    scheduleNextHourlyScan(metaApiConnection, account, riskEngine);
   }, delayMs);
 }
 
-// Engine Startup
+// Engine Startup Sequence
 async function startBot() {
-  console.log("🚀 Initializing Autonomous cTrader FIX Engine...");
-  try {
-    await initializeFixClient();
-  } catch (e) {
-    console.warn("⚠️ [cTrader FIX] Could not establish live SSL session on startup. Continuing in diagnostic/dry-run mode.");
+  console.log("🚀 Initializing Standalone MetaApi (Atlas Funded) Trading Engine...");
+
+  if (!METAAPI_TOKEN || !METAAPI_ACCOUNT_ID) {
+    console.error("❌ ERROR: Missing METAAPI_TOKEN or METAAPI_ACCOUNT_ID in .env.local file.");
+    process.exit(1);
   }
 
-  const balance = await getAccountBalance();
-  const riskEngine = new PropRiskEngine(ACTIVE_PROP_FIRM, balance, balance);
+  const api = new MetaApi(METAAPI_TOKEN);
+  const account = await api.metatraderAccountApi.getAccount(METAAPI_ACCOUNT_ID);
 
-  await runTradingCycle(riskEngine);
-  scheduleNextHourlyScan(riskEngine);
+  console.log("🔌 [MetaApi] Connecting to Atlas Funded MT5 Account...");
+  await account.waitConnected();
+
+  const connection = account.getRPCConnection();
+  await connection.connect();
+  await connection.waitSynchronized();
+
+  console.log("✅ [MetaApi] Connected and synchronized successfully!");
+
+  const accountInfo = await connection.getAccountInformation();
+  const riskEngine = new PropRiskEngine(ACTIVE_PROP_FIRM, accountInfo.balance, accountInfo.balance);
+
+  await runTradingCycle(connection, account, riskEngine);
+  scheduleNextHourlyScan(connection, account, riskEngine);
 }
 
 startBot();
