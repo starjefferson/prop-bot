@@ -1,6 +1,6 @@
 {
   "type": "module",
-  "name": "ctrader-prop-bot",
+  "name": "prop-bot",
   "version": "1.0.0",
   "description": "cTrader Prop Trading Bot",
   "main": "src/index.js",
