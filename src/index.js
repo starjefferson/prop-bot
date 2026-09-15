@@ -1,14 +1,18 @@
 // [File: index.js]
 // [File: src/index.js]
+// [File: src/index.js]
 
 import fs from "fs";
 import path from "path";
 import dotenv from "dotenv";
 import { createRequire } from "module";
 
+// CommonJS Bridge with Safe Module Resolution
 const require = createRequire(import.meta.url);
-const MetaApi = require("metaapi.cloud-sdk");
+const metaApiModule = require("metaapi.cloud-sdk");
+const MetaApi = metaApiModule.default || metaApiModule.MetaApi || metaApiModule;
 
+// Local Imports
 import { runDetection } from "./patternDetection/patternEngine.js";
 import { checkTopDownAlignment } from "./patternDetection/topDownAnalysis.js";
 import { PropRiskEngine } from "./risk/propRiskEngine.js";
