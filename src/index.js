@@ -1,7 +1,3 @@
-// [File: index.js]
-// [File: src/index.js]
-// [File: src/index.js]
-
 import fs from "fs";
 import path from "path";
 import dotenv from "dotenv";
@@ -19,9 +15,7 @@ import { PropRiskEngine } from "./risk/propRiskEngine.js";
 
 dotenv.config({ path: ".env.local" });
 
-// [Target Asset List: All 7 Major FX Pairs]
-
-// [Expanded Asset List for Fast Demo Verification]
+// Asset List
 const PAIRS = [
   "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD",
   "GBPJPY", "EURJPY", "EURAUD", "GBPAUD", "XAUUSD"
@@ -37,7 +31,7 @@ const MAX_CONCURRENT_TRADES = parseInt(process.env.MAX_CONCURRENT_TRADES || "2",
 const METAAPI_TOKEN = process.env.METAAPI_TOKEN;
 const METAAPI_ACCOUNT_ID = process.env.METAAPI_ACCOUNT_ID;
 
-// [Helper: Load JSON file from disk]
+// Helper: Load JSON file from disk
 const loadJSON = (filePath) => {
   try {
     if (!fs.existsSync(filePath)) { fs.writeFileSync(filePath, "[]"); return []; }
@@ -45,46 +39,78 @@ const loadJSON = (filePath) => {
   } catch (e) { return []; }
 };
 
-// [Helper: Save JSON file to disk]
+// Helper: Save JSON file to disk
 const saveJSON = (filePath, data) => {
   try { fs.writeFileSync(filePath, JSON.stringify(data, null, 2)); }
   catch (e) { console.error(`❌ DISK ERROR: ${e.message}`); }
 };
 
-// [Helper: Map timeframe standard code to MetaApi format]
+// Helper: Map timeframe standard code to MetaApi format
 function getMetaApiTimeframe(tf) {
   const map = { "1W": "1w", "1D": "1d", "4H": "4h", "1H": "1h" };
   return map[tf] || "1h";
 }
 
-// [Helper: Stream historical candle data via MetaApi SDK]
-async function fetchMetaApiCandles(account, symbol, tf, count) {
+// Helper: Ensure MetaApi connection is active & synchronized
+async function ensureSynced(metaApiConnection) {
   try {
-    const metaApiTf = getMetaApiTimeframe(tf);
-    const candles = await account.getHistoricalCandles(symbol, metaApiTf, null, count);
-    if (!candles || candles.length === 0) return null;
-
-    return candles.map(c => ({
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
-      time: new Date(c.time).getTime()
-    })).reverse();
+    if (metaApiConnection && typeof metaApiConnection.isSynchronized === "function") {
+      if (!metaApiConnection.isSynchronized()) {
+        console.log("⚠️ [MetaApi] Transport lost/desynchronized. Waiting for resynchronization...");
+        await metaApiConnection.waitSynchronized();
+        console.log("✅ [MetaApi] Connection resynchronized successfully.");
+      }
+    }
   } catch (err) {
-    console.error(`⚠️ MetaApi candle fetch error for ${symbol} (${tf}):`, err.message);
-    return null;
+    console.error(`❌ [MetaApi] Sync wait error: ${err.message}`);
   }
 }
 
-// [Main Market Scan Cycle]
+// Helper: Stream historical candle data via MetaApi SDK with retry resilience
+async function fetchMetaApiCandles(account, symbol, tf, count, metaApiConnection) {
+  const metaApiTf = getMetaApiTimeframe(tf);
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      if (metaApiConnection) await ensureSynced(metaApiConnection);
+      const candles = await account.getHistoricalCandles(symbol, metaApiTf, null, count);
+      if (!candles || candles.length === 0) return null;
+
+      return candles.map(c => ({
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        time: new Date(c.time).getTime()
+      })).reverse();
+    } catch (err) {
+      if (attempt === 1) {
+        console.warn(`⚠️ Candle fetch attempt 1 failed for ${symbol} (${tf}): ${err.message}. Retrying...`);
+        if (metaApiConnection) await ensureSynced(metaApiConnection);
+      } else {
+        console.error(`⚠️ MetaApi candle fetch error for ${symbol} (${tf}):`, err.message);
+        return null;
+      }
+    }
+  }
+}
+
+// Main Market Scan Cycle
 async function runTradingCycle(metaApiConnection, account, riskEngine) {
   console.log(`\n==================================================`);
   console.log(`🔍 [${new Date().toISOString()}] Starting MetaApi Scan across Major FX Pairs...`);
   console.log(`==================================================`);
 
+  await ensureSynced(metaApiConnection);
+
   const history = loadJSON(HISTORY_PATH);
-  const accountInformation = await metaApiConnection.getAccountInformation();
+  let accountInformation;
+  try {
+    accountInformation = await metaApiConnection.getAccountInformation();
+  } catch (e) {
+    console.error(`❌ Failed to fetch account info: ${e.message}`);
+    return;
+  }
+
   const balance = accountInformation.balance;
   const equity = accountInformation.equity;
 
@@ -97,11 +123,11 @@ async function runTradingCycle(metaApiConnection, account, riskEngine) {
     }
 
     try {
-      // [Step 1: Fetch Candle History across 1W, 1D, 4H, and 1H]
-      const w1 = await fetchMetaApiCandles(account, symbol, "1W", 50);
-      const d1 = await fetchMetaApiCandles(account, symbol, "1D", 200);
-      const h4 = await fetchMetaApiCandles(account, symbol, "4H", 200);
-      const h1 = await fetchMetaApiCandles(account, symbol, "1H", 200);
+      // Step 1: Fetch Candle History across 1W, 1D, 4H, and 1H
+      const w1 = await fetchMetaApiCandles(account, symbol, "1W", 50, metaApiConnection);
+      const d1 = await fetchMetaApiCandles(account, symbol, "1D", 200, metaApiConnection);
+      const h4 = await fetchMetaApiCandles(account, symbol, "4H", 200, metaApiConnection);
+      const h1 = await fetchMetaApiCandles(account, symbol, "1H", 200, metaApiConnection);
 
       if (!w1 || !d1 || !h4 || !h1 || h1.length < 50) {
         console.log(`⚠️ [${symbol}] Insufficient candle history returned.`);
@@ -111,13 +137,13 @@ async function runTradingCycle(metaApiConnection, account, riskEngine) {
       const candleData = { "1W": w1, "1D": d1, "4H": h4, "1H": h1 };
       const currentPrice = h1[0].close;
 
-      // [Step 2: Trend Bias Evaluation via 3/4 SMA Rule]
+      // Step 2: Trend Bias Evaluation via 3/4 SMA Rule
       const bias = checkTopDownAlignment(candleData, ["1W", "1D", "4H", "1H"]);
       console.log(`📡 [${symbol}] Price: ${currentPrice} | 3/4 SMA Trend Bias: ${bias ? bias.toUpperCase() : "NONE"}`);
 
       if (!bias) continue;
 
-      // [Step 3: Structural Pattern Detection]
+      // Step 3: Structural Pattern Detection
       const pattern = runDetection(candleData, symbol);
       if (!pattern) continue;
 
@@ -126,14 +152,14 @@ async function runTradingCycle(metaApiConnection, account, riskEngine) {
         continue;
       }
 
-      // [Step 4: Pattern Fingerprint Guard]
+      // Step 4: Pattern Fingerprint Guard
       const patternID = `${symbol}_${pattern.type}_${pattern.headTime}`;
       if (history.find(h => h.patternID === patternID)) {
         console.log(`ℹ️ [${symbol}] Pattern ${patternID} already processed.`);
         continue;
       }
 
-      // [Step 5: Distribution Guard Check]
+      // Step 5: Distribution Guard Check
       const isJpy = symbol.includes("JPY");
       const tooFar = isJpy ? 0.20 : 0.0020;
       if (pattern.type === "sell" && currentPrice < (pattern.necklineLow - tooFar)) {
@@ -145,7 +171,7 @@ async function runTradingCycle(metaApiConnection, account, riskEngine) {
         continue;
       }
 
-      // [Step 6: Breakout & Close Trigger Check]
+      // Step 6: Breakout & Close Trigger Check
       const isBreakout = (pattern.type === "sell" && currentPrice < pattern.necklineLow) ||
                          (pattern.type === "buy" && currentPrice > pattern.necklineHigh);
 
@@ -154,7 +180,7 @@ async function runTradingCycle(metaApiConnection, account, riskEngine) {
         continue;
       }
 
-      // [Step 7: Risk-to-Reward Ratio Filter]
+      // Step 7: Risk-to-Reward Ratio Filter
       const risk = Math.abs(currentPrice - pattern.sl);
       const reward = Math.abs(pattern.tp - currentPrice);
       const rr = reward / risk;
@@ -164,7 +190,7 @@ async function runTradingCycle(metaApiConnection, account, riskEngine) {
         continue;
       }
 
-      // [Step 8: Prop Risk Engine Interceptor]
+      // Step 8: Prop Risk Engine Interceptor
       const riskValidation = riskEngine.validateOrder({
         balance,
         currentEquity: equity,
@@ -179,7 +205,7 @@ async function runTradingCycle(metaApiConnection, account, riskEngine) {
         continue;
       }
 
-      // [Step 9: Lot Sizing & MT5 Execution via MetaApi]
+      // Step 9: Lot Sizing & MT5 Execution via MetaApi
       let lotSize;
       if (symbol.includes("JPY")) {
         lotSize = (riskValidation.maxCapitalToRisk * currentPrice) / (risk * 100000);
@@ -191,6 +217,7 @@ async function runTradingCycle(metaApiConnection, account, riskEngine) {
 
       console.log(`🎯 [${symbol}] TARGET RR ACHIEVED (${rr.toFixed(2)}). Executing MetaApi MT5 Order... Lots: ${lotSize}`);
 
+      await ensureSynced(metaApiConnection);
       const orderResult = await metaApiConnection.createMarketBuyOrder(
         symbol,
         lotSize,
@@ -222,7 +249,7 @@ async function runTradingCycle(metaApiConnection, account, riskEngine) {
   }
 }
 
-// [Smart Hourly Scheduler: Runs at :00:05 UTC every hour]
+// Smart Hourly Scheduler: Runs at :00:05 UTC every hour
 function scheduleNextHourlyScan(metaApiConnection, account, riskEngine) {
   const now = new Date();
   const nextHour = new Date(now);
@@ -234,18 +261,24 @@ function scheduleNextHourlyScan(metaApiConnection, account, riskEngine) {
   console.log(`\n⏰ Next scan scheduled in ${minutesRemaining} minutes (at ${nextHour.toLocaleTimeString()}).`);
 
   setTimeout(async () => {
-    const currentUtc = new Date();
-    if (currentUtc.getUTCHours() === 0) {
-      const info = await metaApiConnection.getAccountInformation();
-      riskEngine.updateStartOfDayBalance(info.balance);
-    }
+    try {
+      await ensureSynced(metaApiConnection);
+      const currentUtc = new Date();
+      if (currentUtc.getUTCHours() === 0) {
+        const info = await metaApiConnection.getAccountInformation();
+        riskEngine.updateStartOfDayBalance(info.balance);
+      }
 
-    await runTradingCycle(metaApiConnection, account, riskEngine);
-    scheduleNextHourlyScan(metaApiConnection, account, riskEngine);
+      await runTradingCycle(metaApiConnection, account, riskEngine);
+    } catch (err) {
+      console.error("❌ Scheduled cycle error:", err.message);
+    } finally {
+      scheduleNextHourlyScan(metaApiConnection, account, riskEngine);
+    }
   }, delayMs);
 }
 
-// [Engine Initialization & MetaApi Connection Sequence]
+// Engine Initialization & MetaApi Connection Sequence
 async function startBot() {
   console.log("🚀 Initializing Standalone MetaApi FX Engine...");
 
