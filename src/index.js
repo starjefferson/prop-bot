@@ -12,13 +12,16 @@ const MetaApi = metaApiModule.default || metaApiModule.MetaApi || metaApiModule;
 import { runDetection } from "./patternDetection/patternEngine.js";
 import { checkTopDownAlignment } from "./patternDetection/topDownAnalysis.js";
 import { PropRiskEngine } from "./risk/propRiskEngine.js";
+import { canExecuteCorrelatedTrade } from "./risk/correlationGuard.js";
+import { logTradeOpen, logTradeClose } from "./utils/historyLogger.js";
+import { DailyCircuitBreaker } from "../propfirm.js";
 
 dotenv.config({ path: ".env.local" });
 
 // Asset List
 const PAIRS = [
   "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD",
-  "GBPJPY", "EURJPY", "EURAUD", "GBPAUD", "XAUUSD"
+  "GBPJPY", "EURJPY", "EURAUD", "GBPAUD"
 ];
 
 const HISTORY_PATH = path.resolve(process.cwd(), "history.json");
@@ -95,10 +98,15 @@ async function fetchMetaApiCandles(account, symbol, tf, count, metaApiConnection
 }
 
 // Main Market Scan Cycle
-async function runTradingCycle(metaApiConnection, account, riskEngine) {
+async function runTradingCycle(metaApiConnection, account, riskEngine, circuitBreaker) {
   console.log(`\n==================================================`);
   console.log(`🔍 [${new Date().toISOString()}] Starting MetaApi Scan across Major FX Pairs...`);
   console.log(`==================================================`);
+
+  if (circuitBreaker && !circuitBreaker.canExecuteNewTrade()) {
+    console.warn("🛑 [Circuit Breaker] Daily trading lock active. Skipping market scan cycle.");
+    return;
+  }
 
   await ensureSynced(metaApiConnection);
 
@@ -113,6 +121,10 @@ async function runTradingCycle(metaApiConnection, account, riskEngine) {
 
   const balance = accountInformation.balance;
   const equity = accountInformation.equity;
+
+  if (circuitBreaker) {
+    circuitBreaker.captureDailyBaseline(equity, balance);
+  }
 
   let executedInCycle = 0;
 
@@ -205,6 +217,20 @@ async function runTradingCycle(metaApiConnection, account, riskEngine) {
         continue;
       }
 
+      // Step 8.5: Currency Correlation Guard Interception
+      let openPositions = [];
+      try {
+        openPositions = await metaApiConnection.getPositions();
+      } catch (posErr) {
+        console.warn(`⚠️ [Correlation Guard] Could not fetch positions from broker: ${posErr.message}`);
+      }
+
+      const correlationCheck = canExecuteCorrelatedTrade(symbol, openPositions, 2);
+      if (!correlationCheck.isAllowed) {
+        console.warn(`🛑 [Correlation Guard] Trade blocked for ${symbol}: ${correlationCheck.reason}`);
+        continue;
+      }
+
       // Step 9: Lot Sizing & MT5 Execution via MetaApi
       let lotSize;
       if (symbol.includes("JPY")) {
@@ -228,20 +254,23 @@ async function runTradingCycle(metaApiConnection, account, riskEngine) {
 
       executedInCycle++;
 
-      history.push({
+      const ticketId = orderResult.numericCode || orderResult.stringCode || orderResult.orderId;
+      await logTradeOpen({
         patternID,
+        ticketId,
         symbol,
         type: pattern.type,
         entryPrice: currentPrice,
         sl: pattern.sl,
         tp: pattern.tp,
-        lots: lotSize,
+        volume: lotSize,
         rr: rr.toFixed(2),
-        propFirm: ACTIVE_PROP_FIRM,
-        orderId: orderResult.numericCode || orderResult.stringCode,
-        executionTime: new Date().toISOString()
+        executionTime: new Date().toISOString(),
+        status: "OPEN",
+        propFirm: ACTIVE_PROP_FIRM
       });
-      saveJSON(HISTORY_PATH, history);
+
+      history.push({ patternID, ticketId, symbol });
 
     } catch (err) {
       console.error(`❌ Scan error for ${symbol}:`, err.message);
@@ -250,7 +279,7 @@ async function runTradingCycle(metaApiConnection, account, riskEngine) {
 }
 
 // Smart Hourly Scheduler: Runs at :00:05 UTC every hour
-function scheduleNextHourlyScan(metaApiConnection, account, riskEngine) {
+function scheduleNextHourlyScan(metaApiConnection, account, riskEngine, circuitBreaker) {
   const now = new Date();
   const nextHour = new Date(now);
   nextHour.setHours(now.getHours() + 1, 0, 5, 0);
@@ -267,13 +296,14 @@ function scheduleNextHourlyScan(metaApiConnection, account, riskEngine) {
       if (currentUtc.getUTCHours() === 0) {
         const info = await metaApiConnection.getAccountInformation();
         riskEngine.updateStartOfDayBalance(info.balance);
+        if (circuitBreaker) circuitBreaker.captureDailyBaseline(info.equity, info.balance);
       }
 
-      await runTradingCycle(metaApiConnection, account, riskEngine);
+      await runTradingCycle(metaApiConnection, account, riskEngine, circuitBreaker);
     } catch (err) {
       console.error("❌ Scheduled cycle error:", err.message);
     } finally {
-      scheduleNextHourlyScan(metaApiConnection, account, riskEngine);
+      scheduleNextHourlyScan(metaApiConnection, account, riskEngine, circuitBreaker);
     }
   }, delayMs);
 }
@@ -301,9 +331,11 @@ async function startBot() {
 
   const accountInfo = await connection.getAccountInformation();
   const riskEngine = new PropRiskEngine(ACTIVE_PROP_FIRM, accountInfo.balance, accountInfo.balance);
+  const circuitBreaker = new DailyCircuitBreaker(ACTIVE_PROP_FIRM);
+  circuitBreaker.captureDailyBaseline(accountInfo.equity, accountInfo.balance);
 
-  await runTradingCycle(connection, account, riskEngine);
-  scheduleNextHourlyScan(connection, account, riskEngine);
+  await runTradingCycle(connection, account, riskEngine, circuitBreaker);
+  scheduleNextHourlyScan(connection, account, riskEngine, circuitBreaker);
 }
 
 startBot();

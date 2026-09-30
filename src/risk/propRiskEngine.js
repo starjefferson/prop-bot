@@ -1,10 +1,10 @@
 // [File: src/risk/propRiskEngine.js]
 
-import { PROP_FIRM_PROFILES } from "../../config/propFirms.js";
+import { PROP_FIRM_PROFILES } from "../../propfirm.js";
 
 export class PropRiskEngine {
-  constructor(firmKey = "atlas_2step_eval", accountBalance = 10000, startOfDayBalance = 10000) {
-    this.profile = PROP_FIRM_PROFILES[firmKey] || PROP_FIRM_PROFILES.atlas_2step_eval;
+  constructor(firmKey = "fundingpips_50k_phase1", accountBalance = 50000, startOfDayBalance = 50000) {
+    this.profile = PROP_FIRM_PROFILES[firmKey] || PROP_FIRM_PROFILES.fundingpips_50k_phase1;
     this.initialBalance = Number(accountBalance) || 10000;
     this.startOfDayBalance = Number(startOfDayBalance) || this.initialBalance;
     
@@ -32,7 +32,9 @@ export class PropRiskEngine {
     this.updateHighWaterMark(currentEquity);
 
     // [1. Weekend Holding Rule Check]
-    if (!this.profile.weekendHoldingAllowed) {
+    // Weekend holding is explicitly permitted across all FundingPips Flex stages
+    const isWeekendHoldingAllowed = this.profile.weekendHoldingAllowed ?? this.profile.allowWeekendHolding ?? true;
+    if (!isWeekendHoldingAllowed) {
       const now = new Date();
       const day = now.getUTCDay(); // 0 = Sunday, 5 = Friday, 6 = Saturday
       const hour = now.getUTCHours();
