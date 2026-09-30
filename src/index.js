@@ -25,7 +25,7 @@ const PAIRS = [
 ];
 
 const HISTORY_PATH = path.resolve(process.cwd(), "history.json");
-const ACTIVE_PROP_FIRM = process.env.ACTIVE_PROP_FIRM || "atlas_2step_eval";
+const ACTIVE_PROP_FIRM = process.env.ACTIVE_PROP_FIRM || "fundingpips_50k_phase1";
 const RISK_PERCENT = parseFloat(process.env.RISK_PERCENT || "1.0");
 const MIN_RR = parseFloat(process.env.MIN_RR || "2.5");
 const MAX_RR = parseFloat(process.env.MAX_RR || "3.0");
