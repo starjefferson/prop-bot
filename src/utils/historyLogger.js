@@ -1,154 +1,219 @@
 /**
- * src/utils/historyLogger.js
- * 
- * Asynchronous Closed Trade Logger
- * Manages history.json records using fs/promises with an asynchronous lock/queue to prevent concurrency race conditions.
+ * historyLogger.js
+ *
+ * Asynchronous trade lifecycle logger using fs.promises (non-blocking).
+ *
+ * Manages local history.json entries for trade open and close events.
+ * All file I/O is async to avoid blocking the main scan/execution loop.
+ *
+ * File schema per trade record:
+ * {
+ *   patternID:     string,   -- Unique fingerprint ("EURUSD_sell_<headTime>")
+ *   ticketId:      string,   -- MetaApi order/ticket ID
+ *   symbol:        string,
+ *   type:          "buy"|"sell",
+ *   entryPrice:    number,
+ *   sl:            number,
+ *   tp:            number,
+ *   volume:        number,   -- Lot size
+ *   rr:            string,   -- "2.50" etc.
+ *   executionTime: string,   -- ISO 8601
+ *   status:        "OPEN"|"CLOSED",
+ *   // Fields added on close:
+ *   closePrice?:   number,
+ *   closeTime?:    string,   -- ISO 8601
+ *   realizedPnL?:  number,   -- USD
+ *   pipsGained?:   number,
+ *   closeReason?:  "TAKE_PROFIT_HIT"|"STOP_LOSS_HIT"|"MANUAL_CLOSE"
+ * }
  */
 
-import fs from "fs/promises";
+import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 
-const HISTORY_PATH = path.resolve(process.cwd(), "history.json");
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const HISTORY_PATH = path.resolve(__dirname, "../../history.json");
 
-// FIFO Promise Queue for atomic file write operations
-let queue = Promise.resolve();
-
-function withLock(operation) {
-  const next = queue.then(async () => {
-    return await operation();
-  }).catch(async (err) => {
-    throw err;
-  });
-
-  queue = next.catch(() => {});
-  return next;
-}
+// --- Internal Helpers --------------------------------------------------------
 
 /**
- * Ensures history.json exists at project root with a valid JSON array.
+ * Reads and parses history.json asynchronously.
+ * Returns an empty array on any read/parse error (fail-safe).
+ *
+ * @returns {Promise<Object[]>}
  */
-async function ensureHistoryFile() {
+export async function readHistory() {
   try {
-    await fs.access(HISTORY_PATH);
-  } catch {
-    await fs.writeFile(HISTORY_PATH, "[]\n", "utf-8");
-  }
-}
-
-/**
- * Reads and parses history.json.
- * @returns {Promise<Array>}
- */
-async function readHistory() {
-  await ensureHistoryFile();
-  try {
-    const raw = await fs.readFile(HISTORY_PATH, "utf-8");
-    const parsed = JSON.parse(raw);
+    const raw = await fs.promises.readFile(HISTORY_PATH, "utf-8");
+    const trimmed = raw.trim();
+    if (!trimmed) return [];
+    const parsed = JSON.parse(trimmed);
     return Array.isArray(parsed) ? parsed : [];
   } catch (err) {
-    console.error(`⚠️ [History Logger] Corrupted history.json detected: ${err.message}. Initializing empty array.`);
+    if (err.code === "ENOENT") {
+      return [];
+    }
+    console.error("[HISTORY LOGGER] Failed to read history.json:", err.message);
     return [];
   }
 }
 
 /**
- * Writes history array to history.json.
- * @param {Array} data 
+ * Serializes and writes the history array to history.json asynchronously.
+ *
+ * @param {Object[]} history
+ * @returns {Promise<void>}
  */
-async function writeHistory(data) {
-  const content = JSON.stringify(data, null, 2) + "\n";
-  await fs.writeFile(HISTORY_PATH, content, "utf-8");
+async function writeHistory(history) {
+  try {
+    await fs.promises.writeFile(
+      HISTORY_PATH,
+      JSON.stringify(history, null, 2),
+      "utf-8"
+    );
+  } catch (err) {
+    console.error("[HISTORY LOGGER] Failed to write history.json:", err.message);
+  }
+}
+
+// --- Public API --------------------------------------------------------------
+
+/**
+ * Fetches all currently OPEN trade records from history.json.
+ *
+ * @returns {Promise<Object[]>}
+ */
+export async function getOpenTrades() {
+  const history = await readHistory();
+  return history.filter((record) => record.status === "OPEN");
 }
 
 /**
- * Appends a new open trade record to history.json.
- * 
- * @param {object} tradePayload
- * @param {string} tradePayload.patternID
- * @param {string|number} tradePayload.ticketId
- * @param {string} tradePayload.symbol
- * @param {string} tradePayload.type
- * @param {number} tradePayload.entryPrice
- * @param {number} tradePayload.sl
- * @param {number} tradePayload.tp
- * @param {number} tradePayload.volume
- * @param {number|string} tradePayload.rr
- * @param {string} [tradePayload.executionTime]
- * @returns {Promise<object>} The logged trade object
+ * Appends a new trade execution payload to history.json with status "OPEN".
+ *
+ * Designed to be called immediately after a successful placeOrder() call.
+ *
+ * @param {Object} tradePayload
+ * @param {string} tradePayload.patternID     - Unique pattern fingerprint
+ * @param {string|number} tradePayload.ticketId - Broker order/ticket ID
+ * @param {string} tradePayload.symbol        - Trading symbol
+ * @param {"buy"|"sell"} tradePayload.type    - Trade direction
+ * @param {number} tradePayload.entryPrice    - Executed entry price
+ * @param {number} tradePayload.sl            - Stop-loss price
+ * @param {number} tradePayload.tp            - Take-profit price
+ * @param {number} tradePayload.volume        - Lot size
+ * @param {string} tradePayload.rr            - Risk-to-reward ratio (e.g. "2.50")
+ * @param {string} [tradePayload.executionTime] - ISO timestamp (defaults to now)
+ * @returns {Promise<void>}
  */
 export async function logTradeOpen(tradePayload) {
-  return withLock(async () => {
+  try {
     const history = await readHistory();
 
     const record = {
-      patternID: tradePayload.patternID,
-      ticketId: tradePayload.ticketId,
-      symbol: tradePayload.symbol,
-      type: tradePayload.type,
-      entryPrice: tradePayload.entryPrice,
-      sl: tradePayload.sl,
-      tp: tradePayload.tp,
-      volume: tradePayload.volume,
-      rr: tradePayload.rr,
-      executionTime: tradePayload.executionTime || new Date().toISOString(),
-      status: "OPEN",
-      ...tradePayload
+      patternID:     tradePayload.patternID     ?? null,
+      ticketId:      tradePayload.ticketId      ? String(tradePayload.ticketId) : null,
+      symbol:        tradePayload.symbol        ?? null,
+      type:          tradePayload.type          ?? null,
+      entryPrice:    tradePayload.entryPrice    ?? null,
+      sl:            tradePayload.sl            ?? null,
+      tp:            tradePayload.tp            ?? null,
+      volume:        tradePayload.volume        ?? null,
+      rr:            tradePayload.rr            ?? null,
+      executionTime: tradePayload.executionTime ?? new Date().toISOString(),
+      status:        "OPEN",
     };
-    record.status = "OPEN"; // Guarantee OPEN status
 
     history.push(record);
     await writeHistory(history);
-    console.log(`📝 [History Logger] Logged OPEN trade for ${record.symbol} (Ticket: ${record.ticketId || record.patternID})`);
-    return record;
-  });
+
+    console.log(
+      `[HISTORY LOGGER] Trade OPEN logged | ` +
+      `${record.symbol} ${record.type?.toUpperCase()} | ` +
+      `Ticket: ${record.ticketId} | Pattern: ${record.patternID}`
+    );
+  } catch (err) {
+    console.error("[HISTORY LOGGER] logTradeOpen error:", err.message);
+  }
 }
 
 /**
- * Updates an existing open trade in history.json with close details.
- * 
- * @param {string|number} ticketIdOrPatternId - The ticketId or patternID matching the trade.
- * @param {object} closeData
- * @param {number} closeData.closePrice
- * @param {string} [closeData.closeTime] - ISO string timestamp
- * @param {number} closeData.realizedPnL - Realized profit/loss in USD
- * @param {number} closeData.pipsGained - Pips gained or lost
- * @param {"TAKE_PROFIT_HIT" | "STOP_LOSS_HIT" | "MANUAL_CLOSE" | "PRE_NEWS_FLATTEN"} closeData.closeReason
- * @returns {Promise<object|null>} The updated trade object, or null if not found
+ * Locates an existing OPEN trade record by ticketId (or patternID as fallback)
+ * and updates it with close outcome data, setting status to "CLOSED".
+ *
+ * @param {string|number} ticketId  - Broker ticket/order ID
+ * @param {Object} closeData
+ * @param {number} closeData.closePrice  - Exit price
+ * @param {string} [closeData.closeTime] - ISO 8601 close timestamp
+ * @param {number} closeData.realizedPnL - Net profit/loss in USD
+ * @param {number} closeData.pipsGained  - Pips gained (negative = loss)
+ * @param {"TAKE_PROFIT_HIT"|"STOP_LOSS_HIT"|"MANUAL_CLOSE"} closeData.closeReason
+ * @param {string} [patternID]           - Fallback patternID
+ * @returns {Promise<boolean>}           - true if record was found and updated
  */
-export async function logTradeClose(ticketIdOrPatternId, closeData = {}) {
-  return withLock(async () => {
+export async function logTradeClose(ticketId, closeData, patternID = null) {
+  try {
     const history = await readHistory();
+    const strTicket = ticketId ? String(ticketId) : null;
 
-    const targetKey = String(ticketIdOrPatternId);
-    const trade = history.find(item => 
-      (item.ticketId !== undefined && String(item.ticketId) === targetKey) ||
-      (item.patternID !== undefined && String(item.patternID) === targetKey)
+    // Primary match: OPEN record with ticketId or patternID
+    let idx = history.findIndex(
+      (record) =>
+        record.status === "OPEN" &&
+        ((strTicket && String(record.ticketId) === strTicket) ||
+         (patternID && record.patternID === patternID))
     );
 
-    if (!trade) {
-      console.warn(`⚠️ [History Logger] Trade not found for identifier: ${ticketIdOrPatternId}`);
-      return null;
+    // Fallback match: Any record matching ticketId or patternID if no OPEN match
+    if (idx === -1) {
+      idx = history.findIndex(
+        (record) =>
+          (strTicket && String(record.ticketId) === strTicket) ||
+          (patternID && record.patternID === patternID)
+      );
     }
 
-    trade.status = "CLOSED";
-    trade.closePrice = closeData.closePrice;
-    trade.closeTime = closeData.closeTime || new Date().toISOString();
-    trade.realizedPnL = closeData.realizedPnL;
-    trade.pipsGained = closeData.pipsGained;
-    trade.closeReason = closeData.closeReason;
+    if (idx === -1) {
+      console.warn(
+        `[HISTORY LOGGER] logTradeClose: No matching record found. ` +
+        `ticketId="${ticketId}" patternID="${patternID}"`
+      );
+      return false;
+    }
+
+    const VALID_REASONS = new Set(["TAKE_PROFIT_HIT", "STOP_LOSS_HIT", "MANUAL_CLOSE"]);
+    const closeReason = VALID_REASONS.has(closeData.closeReason)
+      ? closeData.closeReason
+      : "MANUAL_CLOSE";
+
+    history[idx] = {
+      ...history[idx],
+      status:      "CLOSED",
+      closePrice:  closeData.closePrice  ?? null,
+      closeTime:   closeData.closeTime   ?? new Date().toISOString(),
+      realizedPnL: closeData.realizedPnL ?? null,
+      pipsGained:  closeData.pipsGained  ?? null,
+      closeReason,
+    };
 
     await writeHistory(history);
-    console.log(`📝 [History Logger] Logged CLOSED trade for ${trade.symbol} (Ticket: ${trade.ticketId || trade.patternID}) | PnL: $${closeData.realizedPnL} | Reason: ${closeData.closeReason}`);
-    return trade;
-  });
+
+    const record = history[idx];
+    console.log(
+      `[HISTORY LOGGER] Trade CLOSED logged | ` +
+      `${record.symbol} | Ticket: ${record.ticketId} | ` +
+      `PnL: $${record.realizedPnL?.toFixed(2) ?? "N/A"} | ` +
+      `Reason: ${record.closeReason}`
+    );
+
+    return true;
+  } catch (err) {
+    console.error("[HISTORY LOGGER] logTradeClose error:", err.message);
+    return false;
+  }
 }
 
-/**
- * Returns current trade records from history.json.
- * @returns {Promise<Array>}
- */
-export async function getTradeHistory() {
-  return withLock(async () => {
-    return await readHistory();
-  });
-}
+// Aliases for backwards compatibility across modules
+export const logTradeEntry = logTradeOpen;
+export const logTradeExit = logTradeClose;
