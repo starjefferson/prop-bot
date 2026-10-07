@@ -55,17 +55,26 @@ function getMetaApiTimeframe(tf) {
 }
 
 // Helper: Ensure MetaApi connection is active & synchronized
-async function ensureSynced(metaApiConnection) {
-  try {
-    if (metaApiConnection && typeof metaApiConnection.isSynchronized === "function") {
-      if (!metaApiConnection.isSynchronized()) {
-        console.log("⚠️ [MetaApi] Transport lost/desynchronized. Waiting for resynchronization...");
-        await metaApiConnection.waitSynchronized();
-        console.log("✅ [MetaApi] Connection resynchronized successfully.");
-      }
+async function ensureSynced(metaApiConnection, account) {
+  if (account) {
+    const connectionActive = typeof account.isConnectionActive === "function"
+      ? await account.isConnectionActive()
+      : account.isConnectionActive;
+
+    if (connectionActive === false) {
+      console.warn("🔄 [MetaApi] Account connection is inactive. Waiting for reconnection...");
+      await account.waitConnected();
     }
-  } catch (err) {
-    console.error(`❌ [MetaApi] Sync wait error: ${err.message}`);
+  }
+
+  const synchronized = typeof metaApiConnection?.isSynchronized === "function"
+    ? metaApiConnection.isSynchronized()
+    : metaApiConnection?.isSynchronized;
+
+  if (synchronized === false) {
+    console.warn("⚠️ [MetaApi] RPC connection desynchronized. Waiting for resynchronization...");
+    await metaApiConnection.waitSynchronized();
+    console.log("✅ [MetaApi] Connection resynchronized successfully.");
   }
 }
 
@@ -74,7 +83,7 @@ async function fetchMetaApiCandles(account, symbol, tf, count, metaApiConnection
   const metaApiTf = getMetaApiTimeframe(tf);
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      if (metaApiConnection) await ensureSynced(metaApiConnection);
+      if (metaApiConnection) await ensureSynced(metaApiConnection, account);
       const candles = await account.getHistoricalCandles(symbol, metaApiTf, null, count);
       if (!candles || candles.length === 0) return null;
 
@@ -88,10 +97,10 @@ async function fetchMetaApiCandles(account, symbol, tf, count, metaApiConnection
     } catch (err) {
       if (attempt === 1) {
         console.warn(`⚠️ Candle fetch attempt 1 failed for ${symbol} (${tf}): ${err.message}. Retrying...`);
-        if (metaApiConnection) await ensureSynced(metaApiConnection);
+        if (metaApiConnection) await ensureSynced(metaApiConnection, account);
       } else {
         console.error(`⚠️ MetaApi candle fetch error for ${symbol} (${tf}):`, err.message);
-        return null;
+        throw err;
       }
     }
   }
@@ -108,7 +117,7 @@ async function runTradingCycle(metaApiConnection, account, riskEngine, circuitBr
     return;
   }
 
-  await ensureSynced(metaApiConnection);
+  await ensureSynced(metaApiConnection, account);
 
   const history = loadJSON(HISTORY_PATH);
   let accountInformation;
@@ -129,35 +138,70 @@ async function runTradingCycle(metaApiConnection, account, riskEngine, circuitBr
   let executedInCycle = 0;
 
   for (const symbol of PAIRS) {
+    let finalStatus = `⏭️ [${symbol}] Status: Scan complete (No valid setup)`;
     if (executedInCycle >= MAX_CONCURRENT_TRADES) {
       console.log(`⏹️ Max concurrent trade limit (${MAX_CONCURRENT_TRADES}) reached for this cycle.`);
-      break;
+      finalStatus = `⏭️ [${symbol}] Status: Scan skipped (Trade limit reached)`;
+      console.log(finalStatus);
+      continue;
     }
 
     try {
-      // Step 1: Fetch Candle History across 1W, 1D, 4H, and 1H
+      // Stage 1: Reconnect if needed, then fetch all scan timeframes.
+      await ensureSynced(metaApiConnection, account);
+      console.log(`📥 [${symbol}] Fetching candles: W1...`);
       const w1 = await fetchMetaApiCandles(account, symbol, "1W", 50, metaApiConnection);
+      console.log(`📥 [${symbol}] Fetching candles: D1...`);
       const d1 = await fetchMetaApiCandles(account, symbol, "1D", 200, metaApiConnection);
+      console.log(`📥 [${symbol}] Fetching candles: H4...`);
       const h4 = await fetchMetaApiCandles(account, symbol, "4H", 200, metaApiConnection);
+      console.log(`📥 [${symbol}] Fetching candles: H1...`);
       const h1 = await fetchMetaApiCandles(account, symbol, "1H", 200, metaApiConnection);
+
+      const candleData = { "1W": w1, "1D": d1, "4H": h4, "1H": h1 };
+      const getTrend = (candles) => {
+        if (!candles || candles.length < 20) return "none";
+        const sma = candles.slice(0, 20).reduce((sum, candle) => sum + candle.close, 0) / 20;
+        return candles[0].close > sma ? "buy" : candles[0].close < sma ? "sell" : "none";
+      };
+      const trends = {
+        W1: getTrend(w1),
+        D1: getTrend(d1),
+        H4: getTrend(h4),
+        H1: getTrend(h1)
+      };
+      const bias = checkTopDownAlignment(candleData, ["1W", "1D", "4H", "1H"]);
+      console.log(
+        `📡 [${symbol}] Trends | W1:${trends.W1.toUpperCase()} D1:${trends.D1.toUpperCase()} ` +
+        `H4:${trends.H4.toUpperCase()} H1:${trends.H1.toUpperCase()} | Bias: ${(bias || "none").toUpperCase()}`
+      );
 
       if (!w1 || !d1 || !h4 || !h1 || h1.length < 50) {
         console.log(`⚠️ [${symbol}] Insufficient candle history returned.`);
+        console.log(`ℹ️ [${symbol}] No valid Head & Shoulders pattern detected.`);
         continue;
       }
 
-      const candleData = { "1W": w1, "1D": d1, "4H": h4, "1H": h1 };
       const currentPrice = h1[0].close;
 
-      // Step 2: Trend Bias Evaluation via 3/4 SMA Rule
-      const bias = checkTopDownAlignment(candleData, ["1W", "1D", "4H", "1H"]);
-      console.log(`📡 [${symbol}] Price: ${currentPrice} | 3/4 SMA Trend Bias: ${bias ? bias.toUpperCase() : "NONE"}`);
+      if (!bias) {
+        console.log(`ℹ️ [${symbol}] No valid Head & Shoulders pattern detected.`);
+        continue;
+      }
 
-      if (!bias) continue;
-
-      // Step 3: Structural Pattern Detection
-      const pattern = runDetection(candleData, symbol, bias);
-      if (!pattern) continue;
+      // Stage 3: Report structurally valid patterns, including pending breakouts.
+      let patternDetected = false;
+      const pattern = runDetection(candleData, symbol, bias, ({ type, activeTFs }) => {
+        patternDetected = true;
+        console.log(`✅ [${symbol}] H&S Pattern Detected: [${type.toUpperCase()}/${activeTFs.join("+")}]`);
+      });
+      if (!patternDetected) {
+        console.log(`ℹ️ [${symbol}] No valid Head & Shoulders pattern detected.`);
+      }
+      if (!pattern) {
+        if (patternDetected) finalStatus = `⏳ [${symbol}] Pending: Waiting for neckline break`;
+        continue;
+      }
 
       // Step 4: Pattern Fingerprint Guard
       const patternID = `${symbol}_${pattern.type}_${pattern.headTime}`;
@@ -170,11 +214,11 @@ async function runTradingCycle(metaApiConnection, account, riskEngine, circuitBr
       const isJpy = symbol.includes("JPY");
       const tooFar = isJpy ? 0.20 : 0.0020;
       if (pattern.type === "sell" && currentPrice < (pattern.necklineLow - tooFar)) {
-        console.log(`❌ [${symbol}] Setup Expired: Price already distributed past neckline.`);
+        console.log(`❌ [${symbol}] REJECTED: Setup expired below neckline | Price: ${currentPrice} | Neckline: ${pattern.necklineLow} | Allowed distance: ${tooFar}`);
         continue;
       }
       if (pattern.type === "buy" && currentPrice > (pattern.necklineHigh + tooFar)) {
-        console.log(`❌ [${symbol}] Setup Expired: Price already distributed past neckline.`);
+        console.log(`❌ [${symbol}] REJECTED: Setup expired above neckline | Price: ${currentPrice} | Neckline: ${pattern.necklineHigh} | Allowed distance: ${tooFar}`);
         continue;
       }
 
@@ -184,6 +228,7 @@ async function runTradingCycle(metaApiConnection, account, riskEngine, circuitBr
 
       if (!isBreakout) {
         console.log(`⏳ [${symbol}] Setup Valid. Waiting for breakout close past zone [${pattern.necklineLow} - ${pattern.necklineHigh}]`);
+        finalStatus = `⏳ [${symbol}] Pending: Waiting for neckline break`;
         continue;
       }
 
@@ -193,7 +238,7 @@ async function runTradingCycle(metaApiConnection, account, riskEngine, circuitBr
       const rr = reward / risk;
 
       if (rr < MIN_RR || rr > MAX_RR) {
-        console.log(`⚠️ [${symbol}] Rejected RR: ${rr.toFixed(2)} (Target: ${MIN_RR} - ${MAX_RR})`);
+        console.log(`❌ [${symbol}] REJECTED: Risk-to-reward outside allowed range | RR: ${rr.toFixed(2)} | Required: ${MIN_RR}-${MAX_RR} | Risk: ${risk} | Reward: ${reward}`);
         continue;
       }
 
@@ -208,7 +253,7 @@ async function runTradingCycle(metaApiConnection, account, riskEngine, circuitBr
       });
 
       if (!riskValidation.allowed) {
-        console.warn(`🛑 [Risk Engine] Trade blocked for ${symbol}: ${riskValidation.reason}`);
+        console.warn(`❌ [${symbol}] REJECTED: Prop risk parameters | Reason: ${riskValidation.reason} | Equity: ${equity} | Balance: ${balance} | Risk: ${riskValidation.maxCapitalToRisk ?? "not approved"}`);
         continue;
       }
 
@@ -217,12 +262,12 @@ async function runTradingCycle(metaApiConnection, account, riskEngine, circuitBr
       try {
         openPositions = await metaApiConnection.getPositions();
       } catch (posErr) {
-        console.warn(`⚠️ [Correlation Guard] Could not fetch positions from broker: ${posErr.message}`);
+        throw new Error(`Could not fetch positions for correlation validation: ${posErr.message || String(posErr)}`, { cause: posErr });
       }
 
       const correlationCheck = canExecuteCorrelatedTrade(symbol, openPositions, 2);
       if (!correlationCheck.isAllowed) {
-        console.warn(`🛑 [Correlation Guard] Trade blocked for ${symbol}: ${correlationCheck.reason}`);
+        console.warn(`❌ [${symbol}] REJECTED: Currency correlation guard | Reason: ${correlationCheck.reason}`);
         continue;
       }
 
@@ -238,7 +283,7 @@ async function runTradingCycle(metaApiConnection, account, riskEngine, circuitBr
 
       console.log(`🎯 [${symbol}] TARGET RR ACHIEVED (${rr.toFixed(2)}). Executing MetaApi MT5 Order... Lots: ${lotSize}`);
 
-      await ensureSynced(metaApiConnection);
+      await ensureSynced(metaApiConnection, account);
       const orderResult = await metaApiConnection.createMarketBuyOrder(
         symbol,
         lotSize,
@@ -250,6 +295,7 @@ async function runTradingCycle(metaApiConnection, account, riskEngine, circuitBr
       executedInCycle++;
 
       const ticketId = orderResult.numericCode || orderResult.stringCode || orderResult.orderId;
+      finalStatus = `🚀 [${symbol}] Action: Executing Trade / Sending Alert | Order ID: ${ticketId}`;
       await logTradeOpen({
         patternID,
         ticketId,
@@ -268,7 +314,15 @@ async function runTradingCycle(metaApiConnection, account, riskEngine, circuitBr
       history.push({ patternID, ticketId, symbol });
 
     } catch (err) {
-      console.error(`❌ Scan error for ${symbol}:`, err.message);
+      const message = err?.message || String(err);
+      if (finalStatus.startsWith("🚀")) {
+        console.error(`❌ [${symbol}] Trade executed, but post-trade processing failed: ${message}`);
+      } else {
+        console.error(`❌ [${symbol}] Scan skipped due to RPC error: ${message}`);
+        finalStatus = `❌ [${symbol}] Status: Scan skipped due to RPC error`;
+      }
+    } finally {
+      console.log(finalStatus);
     }
   }
 }
@@ -286,7 +340,7 @@ function scheduleNextHourlyScan(metaApiConnection, account, riskEngine, circuitB
 
   setTimeout(async () => {
     try {
-      await ensureSynced(metaApiConnection);
+      await ensureSynced(metaApiConnection, account);
       const currentUtc = new Date();
       if (currentUtc.getUTCHours() === 0) {
         const info = await metaApiConnection.getAccountInformation();
@@ -333,4 +387,6 @@ async function startBot() {
   scheduleNextHourlyScan(connection, account, riskEngine, circuitBreaker);
 }
 
-startBot();
+startBot().catch((err) => {
+  console.error(`❌ Fatal startup error: ${err?.message || String(err)}`);
+});
