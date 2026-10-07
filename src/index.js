@@ -156,13 +156,8 @@ async function runTradingCycle(metaApiConnection, account, riskEngine, circuitBr
       if (!bias) continue;
 
       // Step 3: Structural Pattern Detection
-      const pattern = runDetection(candleData, symbol);
+      const pattern = runDetection(candleData, symbol, bias);
       if (!pattern) continue;
-
-      if (pattern.type !== bias) {
-        console.log(`⚠️ [${symbol}] Pattern (${pattern.type.toUpperCase()}) conflicts with Trend Bias (${bias.toUpperCase()})`);
-        continue;
-      }
 
       // Step 4: Pattern Fingerprint Guard
       const patternID = `${symbol}_${pattern.type}_${pattern.headTime}`;

@@ -150,10 +150,12 @@ export function detectPatterns(candles, htf1DCandles, htf1WCandles, symbol = "")
 
   // 1. Scan for Head and Shoulders (SELL)
   const hs = findHS(candles, "sell", symbol, htfResistances, htfSupports);
+  if (hs?.rejected) return hs;
   if (hs) return hs;
 
   // 2. Scan for Inverted Head and Shoulders (BUY)
   const ihs = findHS(candles, "buy", symbol, htfResistances, htfSupports);
+  if (ihs?.rejected) return ihs;
   if (ihs) return ihs;
 
   return null;
@@ -235,7 +237,7 @@ function findHS(candles, type, symbol, htfResistances, htfSupports) {
       // ── Rule 1: HTF Catalyst Confluence — Head at HTF Resistance ───────────
       if (!isHeadAtHTFZone(head.val, htfResistances, "sell")) {
         console.log(`❌ [${symbol}] REJECTED: Head did not form at HTF Resistance.`);
-        continue;
+        return { rejected: true };
       }
 
       // ── Rule 2: Path Clearance — No HTF Support blocking the sell path ─────
@@ -248,7 +250,7 @@ function findHS(candles, type, symbol, htfResistances, htfSupports) {
           `Clearance: ${pathCheck.clearance.toFixed(5)} | SL Distance: ${slDistance.toFixed(5)} | ` +
           `Nearest HTF Support: ${pathCheck.nearestLevel}`
         );
-        continue;
+        return { rejected: true };
       }
 
       // ── TP Calculation ──────────────────────────────────────────────────────
@@ -287,7 +289,7 @@ function findHS(candles, type, symbol, htfResistances, htfSupports) {
       // ── Rule 1: HTF Catalyst Confluence — Head at HTF Support ──────────────
       if (!isHeadAtHTFZone(head.val, htfSupports, "buy")) {
         console.log(`❌ [${symbol}] REJECTED: Head did not form at HTF Support.`);
-        continue;
+        return { rejected: true };
       }
 
       // ── Rule 2: Path Clearance — No HTF Resistance blocking the buy path ───
@@ -300,7 +302,7 @@ function findHS(candles, type, symbol, htfResistances, htfSupports) {
           `Clearance: ${pathCheck.clearance.toFixed(5)} | SL Distance: ${slDistance.toFixed(5)} | ` +
           `Nearest HTF Resistance: ${pathCheck.nearestLevel}`
         );
-        continue;
+        return { rejected: true };
       }
 
       // ── TP Calculation ──────────────────────────────────────────────────────
