@@ -196,7 +196,10 @@ async function runTradingCycle(metaApiConnection, account, riskEngine, circuitBr
         console.log(`✅ [${symbol}] H&S Pattern Detected: [${type.toUpperCase()}/${activeTFs.join("+")}]`);
       });
       if (!patternDetected) {
-        console.log(`ℹ️ [${symbol}] No tradable setup found; review the pattern-stage diagnostics above.`);
+        console.log(
+          `ℹ️ [${symbol}] No ${bias.toUpperCase()} setup passed geometry, TP/RR, ` +
+          `multi-timeframe agreement, and 1H trigger checks.`
+        );
       }
       if (!pattern) {
         if (patternDetected) finalStatus = `⏳ [${symbol}] Pending: Waiting for neckline break`;

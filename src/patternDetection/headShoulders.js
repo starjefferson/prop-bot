@@ -19,22 +19,15 @@ function getPipBuffer(val, symbol = "") {
  * Detects H&S / Inverted H&S patterns on the supplied candle array.
  *
  * @param {Array}  candles - Structural candles (4H or 1D timeframe)
+ * @param {"sell"|"buy"} expectedType - Pattern direction matching trend bias
  * @param {string} [symbol] - Symbol used to select the pip buffer
  * @param {Function} [onDiagnostic] - Reports geometry and TP/RR evaluation stages
  * @returns {Object|null}
  */
-export function detectPatterns(candles, symbol = "", onDiagnostic) {
+export function detectPatterns(candles, expectedType, symbol = "", onDiagnostic) {
   if (!candles || candles.length < 50) return null;
 
-  // 1. Scan for Head and Shoulders (SELL)
-  const hs = findHS(candles, "sell", symbol, onDiagnostic);
-  if (hs) return hs;
-
-  // 2. Scan for Inverted Head and Shoulders (BUY)
-  const ihs = findHS(candles, "buy", symbol, onDiagnostic);
-  if (ihs) return ihs;
-
-  return null;
+  return findHS(candles, expectedType, symbol, onDiagnostic);
 }
 
 // ─── Internal Pattern Finder ─────────────────────────────────────────────────
