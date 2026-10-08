@@ -20,17 +20,18 @@ function getPipBuffer(val, symbol = "") {
  *
  * @param {Array}  candles - Structural candles (4H or 1D timeframe)
  * @param {string} [symbol] - Symbol used to select the pip buffer
+ * @param {Function} [onDiagnostic] - Reports geometry and TP/RR evaluation stages
  * @returns {Object|null}
  */
-export function detectPatterns(candles, symbol = "") {
+export function detectPatterns(candles, symbol = "", onDiagnostic) {
   if (!candles || candles.length < 50) return null;
 
   // 1. Scan for Head and Shoulders (SELL)
-  const hs = findHS(candles, "sell", symbol);
+  const hs = findHS(candles, "sell", symbol, onDiagnostic);
   if (hs) return hs;
 
   // 2. Scan for Inverted Head and Shoulders (BUY)
-  const ihs = findHS(candles, "buy", symbol);
+  const ihs = findHS(candles, "buy", symbol, onDiagnostic);
   if (ihs) return ihs;
 
   return null;
@@ -44,9 +45,10 @@ export function detectPatterns(candles, symbol = "") {
  * @param {Array}    candles         - Structural candles (4H or 1D)
  * @param {"sell"|"buy"} type
  * @param {string}   symbol          - For pip buffer selection
+ * @param {Function} [onDiagnostic]
  * @returns {Object|null}
  */
-function findHS(candles, type, symbol) {
+function findHS(candles, type, symbol, onDiagnostic) {
   const mainData    = type === "sell" ? candles.map(c => c.high) : candles.map(c => c.low);
   const supportData = type === "sell" ? candles.map(c => c.low)  : candles.map(c => c.high);
 
@@ -107,9 +109,14 @@ function findHS(candles, type, symbol) {
       const slPrice    = s2.val + buffer;
       const entryPrice = nLow; // Neckline breakout level
 
+      onDiagnostic?.({ type, stage: "geometry" });
+
       // ── TP Calculation ──────────────────────────────────────────────────────
       const tpResult = calculateHistoricalTP(candles, entryPrice, slPrice, "sell", s1.idx);
-      if (!tpResult) continue; // Rejected if key support blocks trade before 2.5 RR
+      if (!tpResult) {
+        onDiagnostic?.({ type, stage: "tp-rejected" });
+        continue; // Rejected if key support blocks trade before 2.5 RR
+      }
 
       return {
         type: "sell",
@@ -140,9 +147,14 @@ function findHS(candles, type, symbol) {
       const slPrice    = s2.val - buffer;
       const entryPrice = nHigh; // Neckline breakout level
 
+      onDiagnostic?.({ type, stage: "geometry" });
+
       // ── TP Calculation ──────────────────────────────────────────────────────
       const tpResult = calculateHistoricalTP(candles, entryPrice, slPrice, "buy", s1.idx);
-      if (!tpResult) continue; // Rejected if key resistance blocks trade before 2.5 RR
+      if (!tpResult) {
+        onDiagnostic?.({ type, stage: "tp-rejected" });
+        continue; // Rejected if key resistance blocks trade before 2.5 RR
+      }
 
       return {
         type: "buy",

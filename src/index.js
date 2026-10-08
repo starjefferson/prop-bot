@@ -178,14 +178,14 @@ async function runTradingCycle(metaApiConnection, account, riskEngine, circuitBr
 
       if (!w1 || !d1 || !h4 || !h1 || h1.length < 50) {
         console.log(`⚠️ [${symbol}] Insufficient candle history returned.`);
-        console.log(`ℹ️ [${symbol}] No valid Head & Shoulders pattern detected.`);
+        console.log(`ℹ️ [${symbol}] Scan skipped: required timeframe candle data is unavailable.`);
         continue;
       }
 
       const currentPrice = h1[0].close;
 
       if (!bias) {
-        console.log(`ℹ️ [${symbol}] No valid Head & Shoulders pattern detected.`);
+        console.log(`ℹ️ [${symbol}] Scan skipped: W1/D1/H4/H1 trend bias is not aligned.`);
         continue;
       }
 
@@ -196,7 +196,7 @@ async function runTradingCycle(metaApiConnection, account, riskEngine, circuitBr
         console.log(`✅ [${symbol}] H&S Pattern Detected: [${type.toUpperCase()}/${activeTFs.join("+")}]`);
       });
       if (!patternDetected) {
-        console.log(`ℹ️ [${symbol}] No valid Head & Shoulders pattern detected.`);
+        console.log(`ℹ️ [${symbol}] No tradable setup found; review the pattern-stage diagnostics above.`);
       }
       if (!pattern) {
         if (patternDetected) finalStatus = `⏳ [${symbol}] Pending: Waiting for neckline break`;
