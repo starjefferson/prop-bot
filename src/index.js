@@ -182,8 +182,6 @@ async function runTradingCycle(metaApiConnection, account, riskEngine, circuitBr
         continue;
       }
 
-      const currentPrice = h1[0].close;
-
       if (!bias) {
         console.log(`ℹ️ [${symbol}] Scan skipped: W1/D1/H4/H1 trend bias is not aligned.`);
         continue;
@@ -191,18 +189,31 @@ async function runTradingCycle(metaApiConnection, account, riskEngine, circuitBr
 
       // Stage 3: Report structurally valid patterns, including pending breakouts.
       let patternDetected = false;
-      const pattern = runDetection(candleData, symbol, bias, ({ type, activeTFs }) => {
+      const pattern = runDetection(candleData, symbol, bias, ({ type, activeTFs, stage }) => {
         patternDetected = true;
-        console.log(`✅ [${symbol}] H&S Pattern Detected: [${type.toUpperCase()}/${activeTFs.join("+")}]`);
+        if (stage === "waiting-breakout" || stage === "waiting-data") {
+          console.log(`✅ [${symbol}] H&S Pattern Detected: [${type.toUpperCase()}/${activeTFs.join("+")}]`);
+          finalStatus = `⏳ [${symbol}] Pending: Waiting for neckline break`;
+        } else if (stage === "breakout-missed") {
+          finalStatus = `⏭️ [${symbol}] Status: Scan complete (Breakout missed; no re-entry)`;
+        } else if (stage === "breakout-history-insufficient") {
+          finalStatus = `⏭️ [${symbol}] Status: Scan complete (Breakout history unavailable; no entry)`;
+        } else if (stage === "breakout-confirmed") {
+          console.log(`✅ [${symbol}] H&S Pattern Detected: [${type.toUpperCase()}/${activeTFs.join("+")}]`);
+        } else if (stage === "rr-rejected") {
+          finalStatus = `⏭️ [${symbol}] Status: Scan complete (Breakout below minimum RR)`;
+        } else if (stage === "invalid-levels") {
+          finalStatus = `⏭️ [${symbol}] Status: Scan complete (Invalid measured-move levels)`;
+        }
+      }, {
+        minimumRR: MIN_RR
       });
       if (!patternDetected) {
         console.log(
-          `ℹ️ [${symbol}] No ${bias.toUpperCase()} setup passed geometry, TP/RR, ` +
-          `multi-timeframe agreement, and 1H trigger checks.`
+          `ℹ️ [${symbol}] No actionable setup returned; see pattern geometry and timeframe diagnostics above.`
         );
       }
       if (!pattern) {
-        if (patternDetected) finalStatus = `⏳ [${symbol}] Pending: Waiting for neckline break`;
         continue;
       }
 
@@ -213,35 +224,18 @@ async function runTradingCycle(metaApiConnection, account, riskEngine, circuitBr
         continue;
       }
 
-      // Step 5: Distribution Guard Check
-      const isJpy = symbol.includes("JPY");
-      const tooFar = isJpy ? 0.20 : 0.0020;
-      if (pattern.type === "sell" && currentPrice < (pattern.necklineLow - tooFar)) {
-        console.log(`❌ [${symbol}] REJECTED: Setup expired below neckline | Price: ${currentPrice} | Neckline: ${pattern.necklineLow} | Allowed distance: ${tooFar}`);
-        continue;
-      }
-      if (pattern.type === "buy" && currentPrice > (pattern.necklineHigh + tooFar)) {
-        console.log(`❌ [${symbol}] REJECTED: Setup expired above neckline | Price: ${currentPrice} | Neckline: ${pattern.necklineHigh} | Allowed distance: ${tooFar}`);
-        continue;
-      }
-
-      // Step 6: Breakout & Close Trigger Check
-      const isBreakout = (pattern.type === "sell" && currentPrice < pattern.necklineLow) ||
-                         (pattern.type === "buy" && currentPrice > pattern.necklineHigh);
-
-      if (!isBreakout) {
-        console.log(`⏳ [${symbol}] Setup Valid. Waiting for breakout close past zone [${pattern.necklineLow} - ${pattern.necklineHigh}]`);
-        finalStatus = `⏳ [${symbol}] Pending: Waiting for neckline break`;
-        continue;
-      }
-
       // Step 7: Risk-to-Reward Ratio Filter
-      const risk = Math.abs(currentPrice - pattern.sl);
-      const reward = Math.abs(pattern.tp - currentPrice);
-      const rr = reward / risk;
+      const entryPrice = pattern.entryPrice;
+      const risk = pattern.type === "sell"
+        ? pattern.sl - entryPrice
+        : entryPrice - pattern.sl;
+      const reward = pattern.type === "sell"
+        ? entryPrice - pattern.tp
+        : pattern.tp - entryPrice;
+      const rr = risk > 0 ? reward / risk : NaN;
 
-      if (rr < MIN_RR || rr > MAX_RR) {
-        console.log(`❌ [${symbol}] REJECTED: Risk-to-reward outside allowed range | RR: ${rr.toFixed(2)} | Required: ${MIN_RR}-${MAX_RR} | Risk: ${risk} | Reward: ${reward}`);
+      if (!(risk > 0) || !(reward > 0) || !Number.isFinite(rr) || rr < MIN_RR || rr > MAX_RR) {
+        console.log(`❌ [${symbol}] REJECTED: Invalid levels or risk-to-reward outside configured range | RR: ${Number.isFinite(rr) ? rr.toFixed(2) : "invalid"} | Required: ${MIN_RR}-${MAX_RR} | Risk: ${risk} | Reward: ${reward}`);
         continue;
       }
 
@@ -250,7 +244,7 @@ async function runTradingCycle(metaApiConnection, account, riskEngine, circuitBr
         balance,
         currentEquity: equity,
         symbol,
-        entryPrice: currentPrice,
+        entryPrice,
         slPrice: pattern.sl,
         riskPercent: RISK_PERCENT
       });
@@ -277,7 +271,7 @@ async function runTradingCycle(metaApiConnection, account, riskEngine, circuitBr
       // Step 9: Lot Sizing & MT5 Execution via MetaApi
       let lotSize;
       if (symbol.includes("JPY")) {
-        lotSize = (riskValidation.maxCapitalToRisk * currentPrice) / (risk * 100000);
+        lotSize = (riskValidation.maxCapitalToRisk * entryPrice) / (risk * 100000);
       } else {
         lotSize = riskValidation.maxCapitalToRisk / (risk * 100000);
       }
@@ -287,13 +281,10 @@ async function runTradingCycle(metaApiConnection, account, riskEngine, circuitBr
       console.log(`🎯 [${symbol}] TARGET RR ACHIEVED (${rr.toFixed(2)}). Executing MetaApi MT5 Order... Lots: ${lotSize}`);
 
       await ensureSynced(metaApiConnection, account);
-      const orderResult = await metaApiConnection.createMarketBuyOrder(
-        symbol,
-        lotSize,
-        pattern.sl,
-        pattern.tp,
-        { comment: `H&S Bot - ${ACTIVE_PROP_FIRM}` }
-      );
+      const orderOptions = { comment: `H&S Bot - ${ACTIVE_PROP_FIRM}` };
+      const orderResult = pattern.type === "buy"
+        ? await metaApiConnection.createMarketBuyOrder(symbol, lotSize, pattern.sl, pattern.tp, orderOptions)
+        : await metaApiConnection.createMarketSellOrder(symbol, lotSize, pattern.sl, pattern.tp, orderOptions);
 
       executedInCycle++;
 
@@ -304,7 +295,7 @@ async function runTradingCycle(metaApiConnection, account, riskEngine, circuitBr
         ticketId,
         symbol,
         type: pattern.type,
-        entryPrice: currentPrice,
+        entryPrice,
         sl: pattern.sl,
         tp: pattern.tp,
         volume: lotSize,

@@ -1,246 +1,135 @@
 /**
- * headShoulders.js
  * Flexible structural detection for H&S and Inverted H&S patterns.
- * Scans 200 candles for local extrema, sets SL at Right Shoulder (s2) + pip buffer,
- * and dynamically projects TP using historical Support & Resistance zones (2.5 - 3.0 RR).
  */
 
-// ─── Pip Buffer Helper ───────────────────────────────────────────────────────
-
-function getPipBuffer(val, symbol = "") {
-  if (symbol.includes("JPY") || (val > 50 && val < 500)) return 0.05;
-  if (symbol.includes("XAU") || symbol.includes("GOLD") || val >= 500) return 0.50;
-  return 0.0005;
-}
-
-// ─── Public Detection Entry Point ────────────────────────────────────────────
-
-/**
- * Detects H&S / Inverted H&S patterns on the supplied candle array.
- *
- * @param {Array}  candles - Structural candles (4H or 1D timeframe)
- * @param {"sell"|"buy"} expectedType - Pattern direction matching trend bias
- * @param {string} [symbol] - Symbol used to select the pip buffer
- * @param {Function} [onDiagnostic] - Reports geometry and TP/RR evaluation stages
- * @returns {Object|null}
- */
 export function detectPatterns(candles, expectedType, symbol = "", onDiagnostic) {
-  if (!candles || candles.length < 50) return null;
+  if (!candles || candles.length < 200) return null;
 
   return findHS(candles, expectedType, symbol, onDiagnostic);
 }
 
-// ─── Internal Pattern Finder ─────────────────────────────────────────────────
-
-/**
- * Core H&S / Inverted H&S structural finder.
- *
- * @param {Array}    candles         - Structural candles (4H or 1D)
- * @param {"sell"|"buy"} type
- * @param {string}   symbol          - For pip buffer selection
- * @param {Function} [onDiagnostic]
- * @returns {Object|null}
- */
 function findHS(candles, type, symbol, onDiagnostic) {
-  const mainData    = type === "sell" ? candles.map(c => c.high) : candles.map(c => c.low);
-  const supportData = type === "sell" ? candles.map(c => c.low)  : candles.map(c => c.high);
+  const pivots = findAlternatingPivots(candles, 5);
+  if (pivots.length < 5) return null;
 
-  let extrema = [];
-  const radius = 5;
-  const limit  = mainData.length - radius;
+  const expectedPivotTypes = type === "sell"
+    ? ["high", "low", "high", "low", "high"]
+    : ["low", "high", "low", "high", "low"];
+  const maxCandidates = Math.min(pivots.length - 4, 12);
 
-  // Identify local peaks (sell) or valleys (buy) with spacing deduplication
-  for (let i = radius; i < limit; i++) {
-    const window = mainData.slice(i - radius, i + radius + 1);
-    const isExtremum = type === "sell"
-      ? (mainData[i] === Math.max(...window))
-      : (mainData[i] === Math.min(...window));
+  for (let start = 0; start < maxCandidates; start++) {
+    const candidate = pivots.slice(start, start + 5);
+    if (candidate.some((pivot, index) => pivot.type !== expectedPivotTypes[index])) continue;
 
-    if (isExtremum) {
-      const last = extrema[extrema.length - 1];
-      if (!last || Math.abs(i - last.idx) >= radius) {
-        extrema.push({ val: mainData[i], idx: i });
-      } else if (
-        (type === "sell" && mainData[i] > last.val) ||
-        (type === "buy"  && mainData[i] < last.val)
-      ) {
-        extrema[extrema.length - 1] = { val: mainData[i], idx: i };
-      }
-    }
-  }
+    const [rightShoulder, rightNeck, head, leftNeck, leftShoulder] = candidate;
+    const gaps = candidate.slice(1).map((pivot, index) => pivot.idx - candidate[index].idx);
+    if (gaps.some(gap => gap < 3 || gap > 60)) continue;
+    if (leftShoulder.idx - rightShoulder.idx > 120) continue;
 
-  if (extrema.length < 3) return null;
+    const atr = calculatePatternATR(candles, rightShoulder.idx, leftShoulder.idx);
+    if (!Number.isFinite(atr) || atr <= 0) continue;
 
-  // Search recent extrema triplets: s2 (Right Shoulder), head, s1 (Left Shoulder)
-  const maxSearch = Math.min(extrema.length - 2, 4);
+    const shoulderDifference = Math.abs(leftShoulder.val - rightShoulder.val);
+    const necklineDifference = Math.abs(leftNeck.val - rightNeck.val);
+    const headProminence = type === "sell"
+      ? head.val - Math.max(leftShoulder.val, rightShoulder.val)
+      : Math.min(leftShoulder.val, rightShoulder.val) - head.val;
+    const necklineMidpoint = (leftNeck.val + rightNeck.val) / 2;
+    const headToNeckline = type === "sell"
+      ? head.val - necklineMidpoint
+      : necklineMidpoint - head.val;
 
-  for (let k = 0; k < maxSearch; k++) {
-    const s2   = extrema[k];
-    const head = extrema[k + 1];
-    const s1   = extrema[k + 2];
+    if (shoulderDifference > atr * 2) continue;
+    if (necklineDifference > atr * 2) continue;
+    if (headProminence < atr * 0.5 || headToNeckline < atr) continue;
 
-    if (head.idx - s2.idx < 3 || s1.idx - head.idx < 3) continue;
+    const headTime = candles[head.idx]?.time ?? head.idx;
+    const rightShoulderTime = candles[rightShoulder.idx]?.time;
+    const necklineStartTime = candles[leftNeck.idx]?.time;
+    const necklineEndTime = candles[rightNeck.idx]?.time;
+    if (![headTime, rightShoulderTime, necklineStartTime, necklineEndTime].every(Number.isFinite)) continue;
 
-    const buffer   = getPipBuffer(s2.val, symbol);
-    const headTime = candles?.[head.idx]?.time ?? head.idx;
+    const measuredMove = Math.abs(head.val - necklineMidpoint);
+    if (!Number.isFinite(measuredMove) || measuredMove <= 0) continue;
 
-    if (type === "sell") {
-      if (!(head.val > s1.val && head.val > s2.val)) continue;
+    const slBuffer = atr * 0.25;
+    const sl = type === "sell"
+      ? rightShoulder.val + slBuffer
+      : rightShoulder.val - slBuffer;
 
-      const slice1 = supportData.slice(head.idx, s1.idx);
-      const slice2 = supportData.slice(s2.idx, head.idx);
-      if (slice1.length === 0 || slice2.length === 0) continue;
+    onDiagnostic?.({ type, stage: "geometry" });
 
-      const trough1 = Math.min(...slice1);
-      const trough2 = Math.min(...slice2);
-      const nHigh   = Math.max(trough1, trough2);
-      const nLow    = Math.min(trough1, trough2);
-
-      // Structural validity: shoulders must be above neckline
-      if (s1.val <= nHigh || s2.val <= nHigh) continue;
-
-      const slPrice    = s2.val + buffer;
-      const entryPrice = nLow; // Neckline breakout level
-
-      onDiagnostic?.({ type, stage: "geometry" });
-
-      // ── TP Calculation ──────────────────────────────────────────────────────
-      const tpResult = calculateHistoricalTP(candles, entryPrice, slPrice, "sell", s1.idx);
-      if (!tpResult) {
-        onDiagnostic?.({ type, stage: "tp-rejected" });
-        continue; // Rejected if key support blocks trade before 2.5 RR
-      }
-
-      return {
-        type: "sell",
-        label: "Head and Shoulders",
-        necklineHigh: nHigh,
-        necklineLow:  nLow,
-        sl: slPrice,
-        tp: tpResult.tp,
-        targetRR: tpResult.rr,
-        headTime
-      };
-
-    } else {
-      if (!(head.val < s1.val && head.val < s2.val)) continue;
-
-      const slice1 = supportData.slice(head.idx, s1.idx);
-      const slice2 = supportData.slice(s2.idx, head.idx);
-      if (slice1.length === 0 || slice2.length === 0) continue;
-
-      const peak1 = Math.max(...slice1);
-      const peak2 = Math.max(...slice2);
-      const nHigh = Math.max(peak1, peak2);
-      const nLow  = Math.min(peak1, peak2);
-
-      // Structural validity: shoulders must be below neckline
-      if (s1.val >= nLow || s2.val >= nLow) continue;
-
-      const slPrice    = s2.val - buffer;
-      const entryPrice = nHigh; // Neckline breakout level
-
-      onDiagnostic?.({ type, stage: "geometry" });
-
-      // ── TP Calculation ──────────────────────────────────────────────────────
-      const tpResult = calculateHistoricalTP(candles, entryPrice, slPrice, "buy", s1.idx);
-      if (!tpResult) {
-        onDiagnostic?.({ type, stage: "tp-rejected" });
-        continue; // Rejected if key resistance blocks trade before 2.5 RR
-      }
-
-      return {
-        type: "buy",
-        label: "Inverted Head and Shoulders",
-        necklineHigh: nHigh,
-        necklineLow:  nLow,
-        sl: slPrice,
-        tp: tpResult.tp,
-        targetRR: tpResult.rr,
-        headTime
-      };
-    }
+    return {
+      type,
+      label: type === "sell" ? "Head and Shoulders" : "Inverted Head and Shoulders",
+      symbol,
+      necklineHigh: Math.max(leftNeck.val, rightNeck.val),
+      necklineLow: Math.min(leftNeck.val, rightNeck.val),
+      necklineStartTime,
+      necklineStartPrice: leftNeck.val,
+      necklineEndTime,
+      necklineEndPrice: rightNeck.val,
+      measuredMove,
+      sl,
+      headTime,
+      rightShoulderTime
+    };
   }
 
   return null;
 }
 
-// ─── Historical TP Calculation ───────────────────────────────────────────────
+function findAlternatingPivots(candles, radius) {
+  const rawPivots = [];
 
-/**
- * Historical Support & Resistance TP Calculation:
- * Caps at 3.0 RR max, rejects if nearest support/resistance blocks the trade before 2.5 RR.
- * Searches historical bars prior to current pattern formation (i >= s1Idx).
- */
-function calculateHistoricalTP(candles, entryPrice, slPrice, type, s1Idx = 0) {
-  const risk = Math.abs(entryPrice - slPrice);
-  if (risk <= 0) return null;
+  for (let i = radius; i < candles.length - radius; i++) {
+    const window = candles.slice(i - radius, i + radius + 1);
+    const isHigh = candles[i].high === Math.max(...window.map(candle => candle.high));
+    const isLow = candles[i].low === Math.min(...window.map(candle => candle.low));
+    if (isHigh === isLow) continue;
 
-  const minRR  = 2.5;
-  const maxRR  = 3.0;
-  const radius = 5;
-
-  const startIdx = Math.max(s1Idx, radius);
-  const endIdx   = candles.length - radius;
-
-  if (type === "sell") {
-    const minRewardTarget = entryPrice - (risk * minRR);
-    const maxRewardTarget = entryPrice - (risk * maxRR);
-
-    const supportZones = [];
-    for (let i = startIdx; i < endIdx; i++) {
-      const windowLows = candles.slice(i - radius, i + radius + 1).map(c => c.low);
-      if (candles[i].low === Math.min(...windowLows)) {
-        supportZones.push(candles[i].low);
-      }
-    }
-
-    // Check if any key support blocks trade before reaching 2.5 RR
-    const blockingSupport = supportZones.find(s => s < entryPrice && s > minRewardTarget);
-    if (blockingSupport !== undefined) return null;
-
-    // Find support zones within the [2.5, 3.0] RR window
-    const validTargets = supportZones.filter(s => s <= minRewardTarget && s >= maxRewardTarget);
-
-    let targetTP, rr;
-    if (validTargets.length > 0) {
-      targetTP = Math.max(...validTargets);
-      rr       = (entryPrice - targetTP) / risk;
-    } else {
-      targetTP = maxRewardTarget;
-      rr       = maxRR;
-    }
-
-    return { tp: targetTP, rr: Math.min(maxRR, Math.max(minRR, rr)) };
-
-  } else {
-    const minRewardTarget = entryPrice + (risk * minRR);
-    const maxRewardTarget = entryPrice + (risk * maxRR);
-
-    const resistanceZones = [];
-    for (let i = startIdx; i < endIdx; i++) {
-      const windowHighs = candles.slice(i - radius, i + radius + 1).map(c => c.high);
-      if (candles[i].high === Math.max(...windowHighs)) {
-        resistanceZones.push(candles[i].high);
-      }
-    }
-
-    // Check if any key resistance blocks trade before reaching 2.5 RR
-    const blockingResistance = resistanceZones.find(r => r > entryPrice && r < minRewardTarget);
-    if (blockingResistance !== undefined) return null;
-
-    // Find resistance zones within the [2.5, 3.0] RR window
-    const validTargets = resistanceZones.filter(r => r >= minRewardTarget && r <= maxRewardTarget);
-
-    let targetTP, rr;
-    if (validTargets.length > 0) {
-      targetTP = Math.min(...validTargets);
-      rr       = (targetTP - entryPrice) / risk;
-    } else {
-      targetTP = maxRewardTarget;
-      rr       = maxRR;
-    }
-
-    return { tp: targetTP, rr: Math.min(maxRR, Math.max(minRR, rr)) };
+    rawPivots.push({
+      type: isHigh ? "high" : "low",
+      val: isHigh ? candles[i].high : candles[i].low,
+      idx: i
+    });
   }
+
+  const pivots = [];
+  for (const pivot of rawPivots) {
+    const previous = pivots[pivots.length - 1];
+    if (!previous || previous.type !== pivot.type) {
+      pivots.push(pivot);
+      continue;
+    }
+
+    const isMoreExtreme = pivot.type === "high"
+      ? pivot.val > previous.val
+      : pivot.val < previous.val;
+    if (isMoreExtreme) pivots[pivots.length - 1] = pivot;
+  }
+
+  return pivots;
+}
+
+function calculatePatternATR(candles, newestIdx, oldestIdx, period = 14) {
+  const trueRanges = [];
+  const start = Math.max(newestIdx, 1);
+  const end = Math.min(oldestIdx, start + period);
+
+  for (let i = start; i < end; i++) {
+    const candle = candles[i];
+    const previousClose = candles[i + 1]?.close;
+    const trueRange = Number.isFinite(previousClose)
+      ? Math.max(
+        candle.high - candle.low,
+        Math.abs(candle.high - previousClose),
+        Math.abs(candle.low - previousClose)
+      )
+      : candle.high - candle.low;
+    trueRanges.push(trueRange);
+  }
+
+  if (trueRanges.length === 0) return NaN;
+  return trueRanges.reduce((sum, value) => sum + value, 0) / trueRanges.length;
 }
